@@ -189,12 +189,14 @@ wrote: on the stack these are tight strings; elsewhere they're decoded strings.
 
 ### Decoded strings (`decoded.rs`)
 
-  1. **Pick candidates** (`features.rs`): score each function by features like
-     tight loops, non-zeroing `xor`s, shifts, and how often it's called;
-     take the top 20, plus all small functions with tight loops. This is
-     FLOSS's `identify.py`, feature for feature. Then, while decoding has taken
-     less than the time budget (5s), keep going down the ranking: the strings are
-     spread far down it, and the score predicts them poorly (EVALUATION.md).
+  1. **Pick candidates** (`features.rs`): find FLOSS's features of each function,
+     like tight loops, non-zeroing `xor`s, shifts, and how often it's called
+     (FLOSS's `identify.py`, feature for feature), and rank the functions by size
+     and by how much their loops work on bytes. That finds more strings than FLOSS's
+     weighted average of the features, which is reported too (EVALUATION.md,
+     "Ranking candidates"). Take the top 20, plus all small functions with tight
+     loops. Then, while decoding has taken less than the time budget (5s), keep
+     going down the ranking.
   2. **Find call contexts**: `explore` each function that calls the candidate,
      and snapshot the state at each call to it. If nothing calls the candidate
      (an entry point, export, or callback), emulate it from its entry instead.

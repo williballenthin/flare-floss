@@ -6,7 +6,7 @@ each routine's strings and cost are recorded in the run's JSON (analysis.decodin
 so a policy that picks a prefix of the emulation order can be evaluated exactly:
 its value is the union of the novel strings from the routines it runs, its cost the sum of their seconds.
 """
-import os, sys, json, pathlib, pickle, re, hashlib, statistics
+import os, sys, json, math, pathlib, pickle, re, hashlib, statistics
 
 SAMPLES = pathlib.Path(os.environ.get("CAPA_TESTFILES", "capa-testfiles"))
 # the parsed run (see --save), which the other scripts read.
@@ -39,6 +39,30 @@ def derived(grams, s):
     return sum(covered) >= 0.4 * len(s)
 
 
+class Trigrams:
+    """a character trigram model of the static strings in a set of files: how much a string reads
+    like the text programs contain (words, paths, names), rather than bytes that happen to be printable."""
+    THRESHOLD = -4.3   # average log-probability per character; below it, strings are junk on inspection.
+
+    def __init__(self, bufs):
+        self.counts, self.ctx = {}, {}
+        for buf in bufs:
+            for m in re.finditer(rb"[\x20-\x7e]{6,}", buf):
+                t = "\x02" + m.group().decode("latin-1") + "\x03"
+                for i in range(len(t) - 2):
+                    self.counts[t[i:i + 3]] = self.counts.get(t[i:i + 3], 0) + 1
+                    self.ctx[t[i:i + 2]] = self.ctx.get(t[i:i + 2], 0) + 1
+
+    def logp(self, s):
+        t = "\x02" + s + "\x03"
+        lp = [math.log((self.counts.get(t[i:i + 3], 0) + 0.1) / (self.ctx.get(t[i:i + 2], 0) + 0.1 * 97))
+              for i in range(len(t) - 2)]
+        return sum(lp) / len(lp)
+
+    def reads_like_text(self, s):
+        return self.logp(s) > self.THRESHOLD
+
+
 def meaningful(s):
     """a rough filter for strings a person would want: not short, mostly letters, not repetitive."""
     if len(s) < 6:
@@ -54,7 +78,7 @@ def meaningful(s):
 
 
 class File:
-    def __init__(self, path):
+    def __init__(self, path, trigrams=None):
         self.name = path.name[:-5]
         d = json.loads(path.read_text())
         buf = (SAMPLES / self.name).read_bytes()
@@ -80,6 +104,7 @@ class File:
                 "address": r["address"], "features": r.get("features", {}),
                 "score": r["score"], "required": r["required"], "seconds": r["seconds"], "calls": r["calls"],
                 "all": strings, "novel": novel, "good": {s for s in novel if meaningful(s)},
+                "words": {s for s in novel if meaningful(s) and trigrams and trigrams.reads_like_text(s)},
             })
         self.complete = len(rs) == self.candidates
         rt = d["metadata"]["runtime"]
@@ -143,10 +168,12 @@ def top_k(K):
 
 
 def load(run, split="all"):
+    paths = sorted(pathlib.Path(run).glob("*.json"))
+    trigrams = Trigrams((SAMPLES / p.name[:-5]).read_bytes() for p in paths if (SAMPLES / p.name[:-5]).exists())
     files = []
-    for path in sorted(pathlib.Path(run).glob("*.json")):
+    for path in paths:
         try:
-            f = File(path)
+            f = File(path, trigrams)
         except Exception:
             continue
         if not f.routines:
@@ -161,11 +188,13 @@ def load(run, split="all"):
 if __name__ == "__main__":
     run = sys.argv[1]
     split = sys.argv[sys.argv.index("--split") + 1] if "--split" in sys.argv else "all"
-    files = load(run, split)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import sim  # so the saved objects are `sim.File`, which the other scripts can load
+    files = sim.load(run, split)
     if "--save" in sys.argv:
         pickle.dump(files, open(DATA, "wb"))
     print(f"{len(files)} files, {sum(f.complete for f in files)} with every candidate emulated")
-    for kind in ("novel", "good"):
+    for kind in ("novel", "good", "words"):
         print(f"\n== {kind}: oracle {sum(len(f.oracle(kind)) for f in files)} strings")
         for T in [0, 0.25, 0.5, 1, 2, 3, 5, 10, 20, 30, 60]:
             e = evaluate(files, budget(T), kind)

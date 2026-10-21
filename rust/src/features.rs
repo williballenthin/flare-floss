@@ -2,9 +2,10 @@
 //!
 //! A port of FLOSS's `identify.py` and `features/`: each function gets
 //! features, like "has a tight loop" or "has a non-zeroing xor", each with
-//! a weight and a score. The weighted average ranks the candidate
-//! decoding routines. Functions with tight loops also get tight string
-//! extraction instead of stack string extraction.
+//! a weight and a score, and FLOSS ranks the candidate decoding routines by
+//! the weighted average. floss-rs reports that, but ranks candidates by a
+//! simpler score that predicts better (see `score`). Functions with tight
+//! loops also get tight string extraction instead of stack string extraction.
 use std::collections::{BTreeMap, BTreeSet};
 
 use lancelot::{
@@ -86,10 +87,16 @@ impl Feature {
 
 #[derive(Debug, Clone)]
 pub struct FunctionFeatures {
-    pub va:       VA,
-    pub features: Vec<Feature>,
-    pub score:    f64,
-    pub xrefs_to: usize,
+    pub va:          VA,
+    pub features:    Vec<Feature>,
+    /// how promising the function is as a decoding routine: candidates are emulated in this order.
+    /// see `score`.
+    pub score:       f64,
+    /// FLOSS's score: the weighted average of the features' scores. reported, for comparison.
+    pub floss_score: f64,
+    pub xrefs_to:    usize,
+    /// instructions in loops that read or write a byte of memory, like `mov byte [edi], al`.
+    pub loop_byte_accesses: usize,
 }
 
 impl FunctionFeatures {
@@ -123,6 +130,7 @@ impl FunctionFeatures {
             };
             *out.entry(name).or_insert(0) += n;
         }
+        out.insert("loop_byte_accesses", self.loop_byte_accesses);
         out
     }
 
@@ -145,16 +153,56 @@ pub fn find_decoding_function_features(ws: &Workspace) -> BTreeMap<VA, FunctionF
         .map(|f| {
             let features = extract_features(ws, f, max_calls_to);
             let total_weight: f64 = features.iter().map(|f| f.weight()).sum();
-            let score = features.iter().map(|f| f.weight() * f.score()).sum::<f64>() / total_weight;
-            let score = (score * 1000.0).round() / 1000.0;
+            let floss_score = features.iter().map(|f| f.weight() * f.score()).sum::<f64>() / total_weight;
+            let loop_byte_accesses = count_loop_byte_accesses(ws, f);
+            let instructions = f.insns().count();
             (f.va, FunctionFeatures {
                 va: f.va,
                 features,
-                score,
+                score: round(score(instructions, loop_byte_accesses)),
+                floss_score: round(floss_score),
                 xrefs_to: ws.callers(f.va).count(),
+                loop_byte_accesses,
             })
         })
         .collect()
+}
+
+fn round(x: f64) -> f64 {
+    (x * 1000.0).round() / 1000.0
+}
+
+/// How promising a function is as a decoding routine, to choose which to emulate first.
+///
+/// FLOSS's score (the weighted average of its features) predicts poorly which functions
+/// yield decoded strings: on the capa test files, its top 20 find about 40% of the strings
+/// that emulating every candidate finds. Bigger functions find more, since emulating a
+/// function runs the code it calls, as do functions that work on bytes in loops; ranking by
+/// these two finds about 50% (see EVALUATION.md, "Ranking candidates").
+fn score(instructions: usize, loop_byte_accesses: usize) -> f64 {
+    (instructions as f64).ln_1p() + (loop_byte_accesses as f64).ln_1p()
+}
+
+/// instructions in loops that read or write a byte of memory.
+fn count_loop_byte_accesses(ws: &Workspace, f: &Function) -> usize {
+    let in_loop: BTreeSet<VA> = find_loops(f).into_iter().flatten().collect();
+    let mut count = 0;
+    for bb in f.blocks.values().filter(|bb| in_loop.contains(&bb.va)) {
+        for &va in bb.insns.iter() {
+            let Some(insn) = ws.decode(va) else {
+                continue;
+            };
+            if insn.mnemonic != zydis::Mnemonic::LEA
+                && insn
+                    .visible_operands()
+                    .iter()
+                    .any(|op| matches!(op.kind, DecodedOperandKind::Mem(_)) && op.size == 8)
+            {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 fn extract_features(ws: &Workspace, f: &Function, max_calls_to: usize) -> Vec<Feature> {
@@ -168,7 +216,7 @@ fn extract_features(ws: &Workspace, f: &Function, max_calls_to: usize) -> Vec<Fe
         },
     ];
 
-    features.extend(find_loops(f).into_iter().map(Feature::Loop));
+    features.extend(find_loops(f).into_iter().filter(|l| l.len() >= 2).map(|l| Feature::Loop(l.len())));
     features.extend(find_tight_loops(ws, f).into_iter().map(Feature::TightLoop));
 
     for bb in f.blocks.values() {
@@ -339,9 +387,9 @@ fn argument_count(ws: &Workspace, f: &Function) -> usize {
     }
 }
 
-/// strongly connected components of the block graph with two or more blocks.
-/// returns the size of each loop.
-fn find_loops(f: &Function) -> Vec<usize> {
+/// the loops of the block graph: strongly connected components with two or more blocks,
+/// or a block that branches to itself. returns the blocks of each.
+fn find_loops(f: &Function) -> Vec<Vec<VA>> {
     // Tarjan's algorithm, iteratively.
     let nodes: Vec<VA> = f.blocks.keys().copied().collect();
     let index_of: BTreeMap<VA, usize> = nodes.iter().enumerate().map(|(i, &va)| (va, i)).collect();
@@ -362,7 +410,7 @@ fn find_loops(f: &Function) -> Vec<usize> {
     let mut on_stack = vec![false; n];
     let mut stack: Vec<usize> = vec![];
     let mut next_index = 0;
-    let mut sizes = vec![];
+    let mut loops = vec![];
 
     for root in 0..n {
         if index[root] != usize::MAX {
@@ -396,23 +444,23 @@ fn find_loops(f: &Function) -> Vec<usize> {
                     lowlink[parent] = lowlink[parent].min(lowlink[v]);
                 }
                 if lowlink[v] == index[v] {
-                    let mut size = 0;
+                    let mut members = vec![];
                     loop {
                         let w = stack.pop().unwrap();
                         on_stack[w] = false;
-                        size += 1;
+                        members.push(nodes[w]);
                         if w == v {
                             break;
                         }
                     }
-                    if size >= 2 {
-                        sizes.push(size);
+                    if members.len() >= 2 || succs[v].contains(&v) {
+                        loops.push(members);
                     }
                 }
             }
         }
     }
-    sizes
+    loops
 }
 
 /// Find tight loops (algorithm by Blaine S.):

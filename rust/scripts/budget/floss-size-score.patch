@@ -1,0 +1,113 @@
+diff --git a/floss/features/extract.py b/floss/features/extract.py
+index f79bbf8..89f41d0 100644
+--- a/floss/features/extract.py
++++ b/floss/features/extract.py
+@@ -286,10 +286,8 @@ def abstract_tightfunction(features):
+                 return
+ 
+ 
+-def extract_function_loop(f):
+-    """
+-    parse if a function has a loop
+-    """
++def get_bb_edges(f):
++    """the edges of the function's basic block graph, as (from, to) block addresses."""
+     edges = []
+ 
+     for bb in f.basic_blocks:
+@@ -307,6 +305,45 @@ def extract_function_loop(f):
+                     or bb.instructions[-1].mnem == "jmp"
+                 ):
+                     edges.append((bb.va, bva))
++    return edges
++
++
++def get_loop_bb_vas(f):
++    """
++    the addresses of the basic blocks in loops:
++    strongly connected components of two or more blocks, or a block that branches to itself.
++    """
++    edges = get_bb_edges(f)
++    g = networkx.DiGraph()
++    g.add_edges_from(edges)
++    in_loop = set()
++    for comp in strongly_connected_components(g):
++        if len(comp) >= 2:
++            in_loop.update(comp)
++    in_loop.update(src for src, dst in edges if src == dst)
++    return in_loop
++
++
++def count_loop_byte_accesses(f):
++    """the instructions in loops that read or write a byte of memory, like `mov byte [edi], al`."""
++    loop_bb_vas = get_loop_bb_vas(f)
++    count = 0
++    for bb in f.basic_blocks:
++        if bb.va not in loop_bb_vas:
++            continue
++        for insn in bb.instructions:
++            if insn.mnem == "lea":
++                continue
++            if any(oper.isDeref() and oper.tsize == 1 for oper in insn.opers):
++                count += 1
++    return count
++
++
++def extract_function_loop(f):
++    """
++    parse if a function has a loop
++    """
++    edges = get_bb_edges(f)
+ 
+     g = networkx.DiGraph()
+     g.add_edges_from(edges)
+diff --git a/floss/identify.py b/floss/identify.py
+index 693c102..cd803c8 100644
+--- a/floss/identify.py
++++ b/floss/identify.py
+@@ -14,6 +14,7 @@
+ 
+ 
+ import copy
++import math
+ import operator
+ import collections
+ from typing import Dict, List, Tuple, DefaultDict
+@@ -28,6 +29,7 @@ from floss.utils import is_thunk_function, redirecting_print_to_tqdm
+ from floss.features.extract import (
+     abstract_features,
+     extract_insn_features,
++    count_loop_byte_accesses,
+     extract_function_features,
+     extract_basic_block_features,
+ )
+@@ -85,6 +87,17 @@ def get_function_score_weighted(features):
+     return round(sum(feature.weighted_score() for feature in features) / sum(feature.weight for feature in features), 3)
+ 
+ 
++def get_function_score_size(instruction_count, loop_byte_accesses):
++    """
++    how promising a function is as a decoding routine: bigger functions, and functions that work on bytes in loops.
++
++    on the capa test files, ranking by this finds more decoded strings with the top 20 candidates
++    than ranking by the weighted average of the features (`get_function_score_weighted`).
++    bigger functions find more because emulating a function also runs the functions it calls.
++    """
++    return round(math.log1p(instruction_count) + math.log1p(loop_byte_accesses), 3)
++
++
+ def get_top_functions(candidate_functions, count=20) -> List[Dict[int, Dict]]:
+     return sorted(candidate_functions.items(), key=lambda x: operator.getitem(x[1], "score"), reverse=True)[:count]
+ 
+@@ -194,7 +207,10 @@ def find_decoding_function_features(vw, functions, disable_progress=False) -> Tu
+             for feature in abstract_features(function_data["features"]):
+                 function_data["features"].append(feature)
+ 
+-            function_data["score"] = get_function_score_weighted(function_data["features"])
++            function_data["weighted_score"] = get_function_score_weighted(function_data["features"])
++            function_data["score"] = get_function_score_size(
++                function_data["meta"].get("instruction_count", 0), count_loop_byte_accesses(f)
++            )
+ 
+             logger.debug("analyzed function 0x%x - total score: %.3f", function_address, function_data["score"])
+             for feat in function_data["features"]:

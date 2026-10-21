@@ -219,6 +219,7 @@ pub fn decode_strings(
         let report = DecodingRoutine {
             address: routine,
             score: f.score,
+            floss_score: f.floss_score,
             required,
             calls,
             strings: strings.len(),

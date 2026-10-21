@@ -114,17 +114,20 @@ pub struct Analysis {
 /// A candidate decoding routine, and what emulating it cost.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DecodingRoutine {
-    pub address: u64,
-    pub score:   f64,
+    pub address:     u64,
+    /// the score candidates are ranked by (see `features::score`).
+    pub score:       f64,
+    /// FLOSS's score, for comparison.
+    pub floss_score: f64,
     /// one of the candidates that are always emulated (the top-scoring ones, and tight functions).
-    pub required: bool,
+    pub required:    bool,
     /// call contexts it was emulated from.
-    pub calls:   usize,
+    pub calls:       usize,
     /// decoded strings it reported, which are listed in order in `decoded_strings`.
-    pub strings: usize,
-    pub seconds: f64,
+    pub strings:     usize,
+    pub seconds:     f64,
     /// the features that made it a candidate, as counts.
-    pub features: std::collections::BTreeMap<&'static str, usize>,
+    pub features:    std::collections::BTreeMap<&'static str, usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
