@@ -19,7 +19,7 @@ instructions sampled from real malware. The gaps are known and bounded.
   - Corpora:
       - the FLOSS test files (`mandiant/flare-floss-testfiles`): 43 Windows binaries
         and shellcode with expected strings, plus 5 other samples;
-      - `tests/programs`: 20 builds of 5 small programs that exercise cases FLOSS misses;
+      - `tests/programs`: 24 builds of 6 small programs that exercise cases FLOSS misses;
       - 315 PE files from `mandiant/capa-testfiles` under 1.5MB (290 native, 25 .NET),
         and a random subset of 40 native files for comparison with Python FLOSS;
       - the largest native PEs in capa-testfiles (3-9.6MB), for scaling.
@@ -76,6 +76,10 @@ What makes the difference (see DESIGN.md):
   - counting calls to a thunk as calls to its target (x64 -O2 starts `decode`
     with a jump into its rotated loop, which looks like a thunk).
 
+A sixth program, `reused-buffer`, checks the cost of reporting whole strings:
+a decoder called twice writes the same string in front of different leftovers
+(`secret key-xyz`, `secret key+abc`), and floss-rs reports it once.
+
 ### Real malware: robustness
 
 floss-rs on all 315 capa test files under 1.5MB:
@@ -83,9 +87,9 @@ floss-rs on all 315 capa test files under 1.5MB:
   - every file completes; there are no crashes or hangs;
   - .NET assemblies (25) and one PE with a malformed exception directory
     (which lancelot rejects) get static strings only, with a warning, like FLOSS for .NET;
-  - mean 1.5s per file, max 19s (with the 2s decoding budget);
-  - 79M instructions emulated, 3.2M snapshots, 369k API calls;
-  - self-modifying code was handled (icicle's code cache flushed) 14 times.
+  - mean 2.3s per file, max 15s (with the 2s decoding budget; 1.4s mean without it);
+  - 240M instructions emulated, 6.4M snapshots, 1.6M API calls;
+  - self-modifying code was handled (icicle's code cache flushed) 36 times.
 
 On the largest files:
 
@@ -98,7 +102,13 @@ On the largest files:
 
 ### Real malware: compared with Python FLOSS
 
-TODO: final numbers from the 40-file subset.
+Python FLOSS and floss-rs on 40 native files picked at random from the capa corpus:
+
+| | novel strings | shared | only this one | total time | per file |
+|---|---|---|---|---|---|
+| Python FLOSS | 1,111 | | 179 (vs. budget 0), 168 (vs. defaults) | 9,102s (2.5 hours) | mean 228s, max 1,183s |
+| floss-rs, `--time-budget 0` (FLOSS's candidates) | 1,057 | 932 | 125 | 67s | 95x faster (median; 13-280x) |
+| floss-rs, defaults (2s budget) | 1,540 | 943 | 597 | 109s | 54x faster (median; 7-178x) |
 
 The comparison counts only *novel* strings: strings that don't appear verbatim
 (ASCII or UTF-16LE) in the file. A plain `strings` finds the rest, so they say
@@ -107,22 +117,38 @@ nothing about deobfuscation. (Python FLOSS reports many static strings as
 match names by substring, and so "decodes" every format string passed to an
 `snprintf` wrapper.)
 
-Examples of novel strings only floss-rs finds: complete ransom notes (HTML,
-with `.onion` URLs), shadow copy deletion commands (`vssadmin delete shadows
-/all /quiet`, `wmic.exe shadowcopy delete`, found because of the time budget),
-`net stop` service lists in full rather than in fragments, Task Scheduler and
-registry configuration keys, base64 key material.
+The 168 novel strings that only Python FLOSS reports (against the defaults) are:
 
-Examples of what only Python FLOSS reports: `ineIntel` (from vivisect's
-emulated `CPUID`), junk-prefixed fragments of static strings (`KA\nss3.dll`),
-and repetitive filler.
+  - 83 pieces of strings that floss-rs reports whole: FLOSS extracts strings from
+    changed bytes, so a decoded `cmd.exe /c net stop MSSQL$SYSTEM_BGC /y` also
+    comes out as `e /c net stop MSSQL$SYSTEM_BGC /y` and `cmd.exe /c net sto`;
+  - 23 emulator artifacts: `ineIntel` and `ntelineI` (vivisect's emulated `CPUID`),
+    the fill byte as text (`fefefefe`), pieces of the emulated module path;
+  - 15 static strings with junk in front (`KA\nss3.dll`, `@\Google\Chrome\User Data\Default\Login Data`);
+  - 47 others, all junk on inspection: short random runs (`_o1VAo1`, `TUTUTUTU`),
+    numbers formatted from uninitialized values (`Unknown error (1096175631)`),
+    and fragments like `wRtlGe` and `omputerNameW`.
+
+With `--time-budget 0`, the only plausibly real string of these is a fragment
+of an API name, `teToolhelp32Snapshot`; with the default budget, floss-rs finds
+it (whole) too.
+
+The strings only floss-rs finds include `net stop` service lists in full
+(27 commands), antivirus driver names (`avipbb.sys`, `cmdhlp.sys`), Task
+Scheduler and registry configuration keys, and key material. They also
+include noise, like intermediate states of decoders (`w1X1_1\1V1C1`) and
+crypto tables built at run time. Most of the extra strings, and most of the
+noise, come from emulating more candidates.
 
 ### Emulating more candidates
 
 FLOSS emulates the 20 highest-scoring candidate decoding routines (plus tight
 functions); with Python's speed, that's a necessary limit. On the 308 native
-capa files, emulating the top 50 instead finds 21% more novel strings
-(4,359 → 5,275) for 32% more total time (469s → 619s).
+capa files, emulating more candidates for up to 2 seconds per file finds 60%
+more novel strings (4,171 → 6,694) for 68% more total time (429s → 721s).
+Among them, more ransom note text (strings containing `.onion`: 15 vs 7) and
+more shadow copy deletion commands (`vssadmin delete shadows`: 5 vs 3;
+`wmic shadowcopy delete`: 3 vs 2).
 So floss-rs emulates at least the top 20, then keeps going, highest score first,
 until decoding has taken 2 seconds (`--time-budget`), and tells the user.
 `--time-budget 0` reproduces FLOSS's fixed set.
@@ -230,5 +256,5 @@ icicle's design (SLEIGH semantics, Rust, copy-on-write snapshots) fits FLOSS wel
     vivisect does more analysis.
   - **Return address repair**: FLOSS's `ApiMonitor` recovers when a decoder
     returns to an unexpected address; floss-rs doesn't.
-  - **Parallelism**: analyses of different functions are independent; large files
-    would benefit from one emulator per thread.
+  - **Parallelism**: stack and tight strings run on several threads (one emulator
+    each) for large files; decoded strings don't yet.
