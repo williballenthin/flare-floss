@@ -1,0 +1,65 @@
+# corrections to the Windows API calling conventions from win32json and phnt (see build_apis.rs).
+# columns: dll.name (or dll.* for every function of the DLL), bytes of arguments the callee pops on x86.
+# 0 means the caller pops them (cdecl), which is also what happens for APIs that aren't listed.
+
+# win32metadata records no calling convention, and these aren't stdcall.
+# variadic functions are cdecl:
+user32.wsprintfA	0
+user32.wsprintfW	0
+shlwapi.wnsprintfA	0
+shlwapi.wnsprintfW	0
+shlwapi.ShellMessageBoxA	0
+shlwapi.ShellMessageBoxW	0
+advapi32.TraceMessage	0
+rtutils.TracePrintfA	0
+rtutils.TracePrintfW	0
+rtutils.TracePrintfExA	0
+rtutils.TracePrintfExW	0
+rpcrt4.NdrClientCall2	0
+rpcrt4.NdrClientCall3	0
+rpcrt4.NdrAsyncClientCall	0
+rpcrt4.NdrDcomAsyncClientCall	0
+rpcrt4.Ndr64AsyncClientCall	0
+rpcrt4.Ndr64DcomAsyncClientCall	0
+rpcrt4.NdrMesProcEncodeDecode	0
+rpcrt4.NdrMesProcEncodeDecode2	0
+rpcrt4.NdrMesProcEncodeDecode3	0
+# and so are these C APIs: LDAP (LDAPAPI), ICU (U_EXPORT2), and cabinet files (DIAMONDAPI);
+# cabinet.dll's compression API (Compress, Decompress, ...) is stdcall.
+wldap32.*	0
+icu.*	0
+cabinet.FCIAddFile	0
+cabinet.FCICreate	0
+cabinet.FCIDestroy	0
+cabinet.FCIFlushCabinet	0
+cabinet.FCIFlushFolder	0
+cabinet.FDICopy	0
+cabinet.FDICreate	0
+cabinet.FDIDestroy	0
+cabinet.FDIIsCabinet	0
+cabinet.FDITruncateCabinet	0
+
+# exports that neither declares.
+# kernel32's interlocked functions, which the SDK declares as compiler intrinsics:
+kernel32.InterlockedIncrement	4
+kernel32.InterlockedDecrement	4
+kernel32.InterlockedExchange	8
+kernel32.InterlockedExchangeAdd	8
+kernel32.InterlockedCompareExchange	12
+# memory functions that the SDK declares as macros (kernel32's forward to ntdll's):
+ntdll.RtlZeroMemory	8
+ntdll.RtlMoveMemory	12
+ntdll.RtlFillMemory	12
+# RC4, undocumented, and used to decrypt strings:
+advapi32.SystemFunction032	8
+advapi32.SystemFunction033	8
+# the C runtime's exception throw, which is stdcall (C++ throw calls it):
+msvcrt._CxxThrowException	8
+# ntdll's 64-bit arithmetic helpers, which the compiler calls; they pop two 64-bit operands:
+ntdll._allmul	16
+ntdll._alldiv	16
+ntdll._allrem	16
+ntdll._aulldiv	16
+ntdll._aullrem	16
+ntdll._alldvrm	16
+ntdll._aulldvrm	16

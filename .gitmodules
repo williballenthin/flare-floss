@@ -1,3 +1,11 @@
 [submodule "tests/data"]
 	path = tests/data
 	url = ../flare-floss-testfiles.git
+[submodule "rust/deps/win32json"]
+	path = rust/deps/win32json
+	url = https://github.com/marlersoft/win32json.git
+	shallow = true
+[submodule "rust/deps/phnt"]
+	path = rust/deps/phnt
+	url = https://github.com/winsiderss/phnt.git
+	shallow = true

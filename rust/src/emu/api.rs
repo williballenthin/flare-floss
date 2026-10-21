@@ -22,54 +22,63 @@ const CURRENT_PROCESS: u64 = 7331;
 const PROCESS_HEAP: u64 = 42;
 const MAX_STRING: usize = 512;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Convention {
-    /// callee pops the arguments.
-    Stdcall,
-    /// caller pops the arguments.
-    Cdecl,
-    /// first two arguments in registers, callee pops the rest.
-    Fastcall,
+/// How many bytes of arguments each Windows API pops when it returns, on x86,
+/// from win32metadata and phnt (see `build_apis.rs`).
+struct X86Apis {
+    /// by lowercase "dll.name".
+    by_import: HashMap<String, u32>,
+    /// by lowercase name, unless DLLs disagree: for APIs imported from another
+    /// DLL than the one that declares them, like an API set or a forwarder.
+    by_name:   HashMap<String, Option<u32>>,
 }
 
-/// calling convention and argument count, by lowercase "dll.name", for x86.
-fn x86_apis() -> &'static HashMap<String, (Convention, u8)> {
-    static APIS: OnceLock<HashMap<String, (Convention, u8)>> = OnceLock::new();
+fn x86_apis() -> &'static X86Apis {
+    static APIS: OnceLock<X86Apis> = OnceLock::new();
     APIS.get_or_init(|| {
-        include_str!("../../data/apis-x86.tsv")
-            .lines()
-            .filter(|line| !line.starts_with('#'))
-            .filter_map(|line| {
-                let mut parts = line.split('\t');
-                let name = parts.next()?;
-                let conv = match parts.next()? {
-                    "cdecl" => Convention::Cdecl,
-                    "msfastcall" | "bfastcall" => Convention::Fastcall,
-                    _ => Convention::Stdcall,
-                };
-                let argc = parts.next()?.parse().ok()?;
-                Some((name.to_string(), (conv, argc)))
-            })
-            .collect()
+        let mut apis = X86Apis {
+            by_import: HashMap::new(),
+            by_name:   HashMap::new(),
+        };
+        for line in include_str!(concat!(env!("OUT_DIR"), "/apis-x86.tsv")).lines() {
+            let mut parts = line.split('\t');
+            let (Some(dll), Some(name), Some(Ok(bytes))) = (parts.next(), parts.next(), parts.next().map(str::parse))
+            else {
+                continue;
+            };
+            let name = name.to_lowercase();
+            apis.by_import.insert(format!("{dll}.{name}"), bytes);
+            apis.by_name
+                .entry(name)
+                .and_modify(|b| {
+                    if *b != Some(bytes) {
+                        *b = None
+                    }
+                })
+                .or_insert(Some(bytes));
+        }
+        apis
     })
 }
 
-/// How many bytes of arguments the callee pops when returning from the given function.
-fn callee_cleanup(emu: &Emulator, target: VA, name: &str) -> u64 {
+/// How many bytes of arguments the callee pops when returning from the function at `target`.
+fn callee_cleanup(emu: &Emulator, target: VA) -> u64 {
     if let Arch::X64 = emu.arch {
         return 0;
     }
 
-    if emu.stub_at(target).is_some() {
-        match x86_apis().get(&name.to_lowercase()) {
-            Some((Convention::Stdcall, argc)) => 4 * *argc as u64,
-            Some((Convention::Fastcall, argc)) => 4 * argc.saturating_sub(2) as u64,
-            // unknown APIs are treated like vivisect does: stdcall, no arguments.
-            Some((Convention::Cdecl, _)) | None => 0,
+    match emu.stub_at(target) {
+        Some(stub) => {
+            let apis = x86_apis();
+            let name = stub.name.to_lowercase();
+            apis.by_import
+                .get(&format!("{}.{name}", stub.dll))
+                .copied()
+                .or_else(|| apis.by_name.get(&name).copied().flatten())
+                // unknown APIs are treated like vivisect does: no arguments.
+                .unwrap_or(0) as u64
         }
-    } else {
         // a function in the program: we found its `ret N` during analysis.
-        emu.callee_cleanup.get(&target).copied().unwrap_or(0) as u64
+        None => emu.callee_cleanup.get(&target).copied().unwrap_or(0) as u64,
     }
 }
 
@@ -238,7 +247,7 @@ pub fn call(emu: &mut Emulator, target: VA, name: &str, models: bool) -> bool {
         Outcome::Stop => return true,
     };
 
-    let cleanup = callee_cleanup(emu, target, name);
+    let cleanup = callee_cleanup(emu, target);
     emu.return_from_call(value, cleanup);
     false
 }

@@ -109,8 +109,31 @@ vivisect's `LoadLibrary`/`GetModuleHandle`/`GetProcAddress`, which turn
 dynamically resolved APIs into stubs. Models match normalized names exactly
 (`kernel32.HeapAlloc`, `_malloc`, `_HeapAlloc@12` → `heapalloc`, `malloc`, `heapalloc`),
 rather than by substring as FLOSS does (where `free` matches `FreeLibrary`, and
-`snprintf` matches `_vsnprintf`). Argument counts and calling conventions for
-x86 stdcall APIs come from vivisect's API database (`data/apis-x86.tsv`).
+`snprintf` matches `_vsnprintf`).
+
+On x86, most APIs are stdcall: the API pops its arguments, so returning from a
+stub has to pop them, too. How many bytes that is comes from Microsoft's
+win32metadata (as JSON, from [win32json](https://github.com/marlersoft/win32json)),
+and for the native API (`Nt*`, `Rtl*`, ...) from the
+[phnt](https://github.com/winsiderss/phnt) headers. Both are git submodules in
+`deps/`, which `build.rs` reads into a table (`build_apis.rs`), with a few
+corrections (`data/apis-x86-overrides.tsv`): win32metadata records no calling
+convention, so its variadic and cdecl functions are listed there, as are
+exports neither source declares, like `InterlockedIncrement`. An API imported
+from another DLL than the one that declares it, like an API set, is found by
+name. Unknown APIs pop nothing, like in vivisect.
+
+FLOSS uses vivisect's API database instead (as did floss-rs, at first). For the
+APIs that the x86 programs in capa-testfiles import, the two disagree on 10%
+(2,429 of 24,008, counting each program's imports): vivisect doesn't know 1,851
+of them, like `oleaut32`, `shlwapi`, `crypt32` and `winhttp`; for 515 it has the
+wrong number of arguments, like one too few for the socket functions (`recv`,
+`setsockopt`, `connect`, ...) and none for `FreeSid` or `ExitThread`; and it
+knows 63 that the new table doesn't, mostly undocumented `advapi32` functions,
+and C runtime functions it takes for stdcall (`qsort`). A wrong count misaligns
+the stack after the call, but most functions restore it from the frame pointer,
+so this changed few strings: 7 of 212 x86 programs at `--time-budget 0`, and only
+fragments.
 
 ### Calls
 

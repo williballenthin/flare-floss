@@ -13,6 +13,7 @@ FLOSS misses, and is 20-100x faster. See:
   - [doc/EVALUATION.md](doc/EVALUATION.md): correctness, speed, and what icicle can and can't do.
 
 ```
+git submodule update --init rust/deps/win32json rust/deps/phnt
 cargo build --release
 ./target/release/floss-rs sample.exe
 ./target/release/floss-rs -j sample.exe > results.json
@@ -56,7 +57,9 @@ src/
   stackstrings.rs    stack strings
   tightstrings.rs    tight strings
   decoded.rs         decoded strings
-data/apis-x86.tsv    Windows API calling conventions (from vivisect)
+build_apis.rs        generates Windows API calling conventions, from deps/
+data/                corrections to them
+deps/                submodules: win32json (win32metadata as JSON), phnt (native API headers)
 sleigh/x86/          Ghidra's x86 SLEIGH specifications
 tests/               unit tests against Python FLOSS's string functions,
                      and end-to-end tests on programs in tests/programs
