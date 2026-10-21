@@ -100,11 +100,12 @@ fn is_floss_artifact(s: &str) -> bool {
             && MOD_NAME
                 .match_indices(lower.as_str())
                 .any(|(i, m)| i < distinctive.end && distinctive.start < i + m.len()))
-        || lower.contains("fefefefe")
-        || lower.contains("fe fe fe fe")
-        // 0xFEFEFEFE as signed and unsigned decimal
-        || s.contains("16843010")
-        || s.contains("4278124286")
+        // the fill byte in hex, like "fefefefe", "FE FE FE FE", or "fefe:fefe" (an IPv6 address).
+        || lower.replace([' ', ':', '-', '.', ','], "").contains("fefefefe")
+        // 0xFEFEFEFE and 0xFEFEFEFEFEFEFEFE as signed and unsigned decimal
+        || ["16843010", "4278124286", "72340172838076674", "18374403900871474942"]
+            .iter()
+            .any(|n| s.contains(n))
 }
 
 struct Filters {
@@ -264,6 +265,9 @@ mod tests {
         assert!(is_floss_artifact("rogram.exe"));
         assert!(is_floss_artifact("C:\\Users\\flare\\"));
         assert!(is_floss_artifact("fefefefe"));
+        assert!(is_floss_artifact("fefe:fefe:fefe:fefe:fefe:fefe:fefe:fefe"));
+        assert!(is_floss_artifact("18374403900871474942"));
+        assert!(!is_floss_artifact("coffee fe fe"));
         assert!(!is_floss_artifact("C:\\Users"));
         assert!(!is_floss_artifact(".exe"));
     }
