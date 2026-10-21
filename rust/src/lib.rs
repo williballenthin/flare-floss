@@ -11,7 +11,7 @@
 //!   - the analyses, which combine the above:
 //!     `stackstrings`, `tightstrings`, `features` (which functions to emulate),
 //!     and `decoded` (emulate decoding routines).
-use web_time::Instant;
+use std::time::Instant;
 
 use anyhow::Result;
 

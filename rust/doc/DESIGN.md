@@ -293,8 +293,7 @@ file without uploading it. The code is the same; three things differ:
     standard library provides in WebAssembly only on WASI (`wasm32-wasip1`).
     The module imports six WASI functions (the clock, randomness, an empty
     environment, stderr, exit), which `web/floss.js` implements, and exports
-    `floss_analyze`, which returns floss-rs's JSON results. floss-rs itself uses
-    `web_time::Instant`, which is `std`'s everywhere but the browser.
+    `floss_analyze`, which returns floss-rs's JSON results.
   - **One thread**, in a web worker (`web/worker.js`). Threads would need
     shared memory, which needs cross-origin isolation headers from the server.
 

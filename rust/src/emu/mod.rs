@@ -455,7 +455,7 @@ impl Emulator {
     }
 
     pub fn snapshot(&mut self) -> Snapshot {
-        let t = web_time::Instant::now();
+        let t = std::time::Instant::now();
         self.stats.snapshots += 1;
         let s = Snapshot::capture(&mut self.vm.cpu, self.heap_next);
         self.stats.snapshot_us += t.elapsed().as_micros() as u64;
@@ -463,7 +463,7 @@ impl Emulator {
     }
 
     pub fn restore(&mut self, snapshot: &Snapshot) {
-        let t = web_time::Instant::now();
+        let t = std::time::Instant::now();
         self.heap_next = snapshot.restore_into(&mut self.vm.cpu);
         self.stats.restore_us += t.elapsed().as_micros() as u64;
     }

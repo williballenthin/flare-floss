@@ -57,7 +57,7 @@ pub fn explore(emu: &mut Emulator, opts: &ExecOptions, observer: &mut impl Obser
     };
 
     let start = emu.pc();
-    let t0 = web_time::Instant::now();
+    let t0 = std::time::Instant::now();
     let mut queue = VecDeque::from([emu.snapshot()]);
     let mut seen: HashSet<VA> = Default::default();
     let mut budget = MAX_EXPLORE_INSNS;
