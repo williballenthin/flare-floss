@@ -39,7 +39,7 @@ pub struct Nothing;
 impl Observer for Nothing {}
 
 /// an upper bound on the instructions `explore` emulates, in case of pathological code.
-const MAX_EXPLORE_INSNS: u64 = 1_000_000;
+const MAX_EXPLORE_INSNS: u64 = 100_000;
 
 /// Emulate every path through the function at the emulator's program counter,
 /// each instruction at most once.

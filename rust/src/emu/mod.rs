@@ -289,8 +289,10 @@ impl Emulator {
             triple: triple.parse().map_err(|_| anyhow!("invalid target triple"))?,
             // the shadow stack would complain about our fake returns.
             enable_shadow_stack: false,
-            // most code is emulated once, so compiling it isn't worth it.
+            // most code is emulated once, so compiling or optimizing it isn't worth it.
             enable_jit: false,
+            optimize_instructions: false,
+            optimize_block: false,
             ..Default::default()
         };
         let mut vm = icicle_vm::build_with_path(&config, &sleigh::processors_dir()?)

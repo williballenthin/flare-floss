@@ -44,6 +44,7 @@ pub fn extract_tightstrings(
             emu.reset(*fva);
             let init_sp = emu.sp();
 
+            let t0 = std::time::Instant::now();
             if !driver::explore_to(emu, &opts, tl.start) {
                 log::debug!("tightstrings: didn't reach loop at {:#x} in {fva:#x}", tl.start);
                 continue;
@@ -58,8 +59,14 @@ pub fn extract_tightstrings(
                 None => Default::default(),
             };
 
+            let t1 = std::time::Instant::now();
             let end = driver::run_to(emu, &opts, tl.end, &limits, &mut driver::Nothing);
-            log::debug!("tightstrings: loop at {:#x} in {fva:#x}: {end:?}", tl.start);
+            log::debug!(
+                "tightstrings: loop at {:#x} in {fva:#x}: {end:?}, explore {:?}, run {:?}",
+                tl.start,
+                t1 - t0,
+                t1.elapsed()
+            );
 
             if let Some(ctx) = StackContext::capture(emu, tl.start, init_sp) {
                 results.extend(ctx.strings(*fva, min_length, &before, emu.pointer_size()));

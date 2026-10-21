@@ -27,8 +27,17 @@ pub mod workspace;
 
 use results::{ResultDocument, StaticString};
 
+/// The kind of input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Pe,
+    Shellcode32,
+    Shellcode64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Options {
+    pub format:          Format,
     pub min_length:      usize,
     pub static_strings:  bool,
     pub stack_strings:   bool,
@@ -45,6 +54,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
+            format:          Format::Pe,
             min_length:      strings::MIN_LENGTH,
             static_strings:  true,
             stack_strings:   true,
@@ -86,7 +96,20 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
     }
 
     let t = Instant::now();
-    let ws = workspace::Workspace::from_pe(buf, &opts.signatures)?;
+    let ws = match opts.format {
+        Format::Pe => workspace::Workspace::from_pe(buf, &opts.signatures),
+        Format::Shellcode32 => workspace::Workspace::from_shellcode(buf, lancelot::arch::Arch::X32),
+        Format::Shellcode64 => workspace::Workspace::from_shellcode(buf, lancelot::arch::Arch::X64),
+    };
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(e) => {
+            // like FLOSS, still report the static strings, such as for .NET assemblies.
+            log::warn!("can't analyze the program, so only extracting static strings: {e}");
+            doc.metadata.runtime.total = seconds(t0);
+            return Ok(doc);
+        }
+    };
     let mut emu = emu::Emulator::new(&ws)?;
     doc.metadata.imagebase = ws.base_address();
     doc.analysis.functions_discovered = ws.functions().count();

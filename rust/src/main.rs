@@ -11,12 +11,27 @@ enum StringType {
     Decoded,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Format {
+    /// PE files, and shellcode by extension (.sc32, .raw32, .sc64, .raw64)
+    Auto,
+    Pe,
+    /// 32-bit shellcode
+    Sc32,
+    /// 64-bit shellcode
+    Sc64,
+}
+
 /// FLOSS, the FLARE Obfuscated String Solver: extract obfuscated strings from malware.
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Args {
     /// path to the PE file to analyze
     sample: PathBuf,
+
+    /// the kind of input
+    #[arg(short = 'f', long, value_enum, default_value_t = Format::Auto)]
+    format: Format,
 
     /// minimum string length
     #[arg(short = 'n', long, default_value_t = 4)]
@@ -65,11 +80,19 @@ fn expand_signatures(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,lancelot=error")).init();
     let args = Args::parse();
+
+    let ext = args.sample.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let format = match (args.format, ext.as_str()) {
+        (Format::Sc32, _) | (Format::Auto, "sc32" | "raw32") => floss::Format::Shellcode32,
+        (Format::Sc64, _) | (Format::Auto, "sc64" | "raw64") => floss::Format::Shellcode64,
+        _ => floss::Format::Pe,
+    };
 
     let enabled = |t: StringType| (args.only.is_empty() || args.only.contains(&t)) && !args.no.contains(&t);
     let opts = floss::Options {
+        format,
         min_length: args.minimum_length,
         static_strings: enabled(StringType::Static),
         stack_strings: enabled(StringType::Stack),

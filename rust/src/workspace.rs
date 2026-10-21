@@ -5,12 +5,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use anyhow::Result;
 use lancelot::{
     analysis::{
-        cfg::flow::Flow,
-        dis::{self, zydis},
+        cfg::{flow::Flow, InstructionIndex, CFG},
+        dis::{self, zydis, Target},
         pe::ImportedSymbol,
     },
     arch::Arch,
-    aspace::AddressSpace,
+    aspace::{AddressSpace, RelativeAddressSpace},
     loader::pe::PE,
     module::Module,
     workspace::{config::DynamicConfiguration, FunctionFlags, PEWorkspace},
@@ -48,8 +48,15 @@ impl Function {
 }
 
 pub struct Workspace {
-    ws:        PEWorkspace,
+    module:    Module,
+    cfg:       CFG,
     functions: BTreeMap<VA, Function>,
+    /// functions that just jump elsewhere, like `jmp [__imp_malloc]`.
+    thunks:    BTreeSet<VA>,
+    /// names of library functions, from FLIRT signatures (when enabled).
+    names:     BTreeMap<VA, String>,
+    /// import address table entries.
+    imports:   Vec<(VA, Stub)>,
     /// instruction address -> the function that contains it (the first, if shared).
     owners:    HashMap<VA, VA>,
     /// function address -> addresses of call instructions that call it.
@@ -58,15 +65,110 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Load a PE file. FLIRT signatures are optional.
     pub fn from_pe(buf: &[u8], sigs: &[std::path::PathBuf]) -> Result<Workspace> {
         let pe = PE::from_bytes(buf)?;
         let config = DynamicConfiguration::default().with_sig_paths(sigs);
         let ws = PEWorkspace::from_pe(Box::new(config), pe)?;
-        let decoder = dis::get_disassembler(&ws.pe.module)?;
+
+        let thunks = ws
+            .analysis
+            .functions
+            .iter()
+            .filter(|(_, f)| f.flags.intersects(FunctionFlags::THUNK))
+            .map(|(&va, _)| va)
+            .collect();
+
+        let names = ws
+            .analysis
+            .names
+            .names_by_address
+            .iter()
+            .filter(|(va, name)| ws.analysis.functions.contains_key(va) && !name.starts_with("sub_"))
+            .map(|(&va, name)| (va, name.clone()))
+            .collect();
+
+        let imports = ws
+            .analysis
+            .imports
+            .values()
+            .map(|import| {
+                let dll = import.dll.to_lowercase();
+                let dll = dll.strip_suffix(".dll").unwrap_or(&dll).to_string();
+                let name = match &import.symbol {
+                    ImportedSymbol::Name(name) => name.clone(),
+                    ImportedSymbol::Ordinal(ord) => format!("#{ord}"),
+                };
+                (import.address, Stub { dll, name })
+            })
+            .collect();
+
+        let starts = ws.analysis.functions.keys().copied().collect();
+        Workspace::new(ws.pe.module, ws.cfg, starts, thunks, names, imports)
+    }
+
+    /// Load raw shellcode, which starts executing at its first byte.
+    pub fn from_shellcode(buf: &[u8], arch: Arch) -> Result<Workspace> {
+        // like vivisect's shellcode workspaces.
+        const BASE_ADDRESS: VA = 0x690000;
+
+        let size = ((buf.len() as u64 + 0xFFF) & !0xFFF).max(0x1000);
+        let mut padded = buf.to_vec();
+        padded.resize(size as usize, 0);
+        let module = Module {
+            arch,
+            sections: vec![lancelot::module::Section {
+                physical_range: 0..buf.len() as u64,
+                virtual_range:  BASE_ADDRESS..BASE_ADDRESS + size,
+                permissions:    lancelot::module::Permissions::RWX,
+                name:           "shellcode".to_string(),
+            }],
+            address_space: RelativeAddressSpace::from_buf(&padded).into_absolute(BASE_ADDRESS)?,
+        };
+
+        let mut insns: InstructionIndex = Default::default();
+        let mut starts: BTreeSet<VA> = BTreeSet::from([BASE_ADDRESS]);
+        insns.build_index(&module, BASE_ADDRESS)?;
+        loop {
+            let new_code = lancelot::analysis::cfg::code_references::find_new_code_references(&module, &insns)?;
+            if new_code.is_empty() {
+                break;
+            }
+            for va in new_code {
+                insns.build_index(&module, va)?;
+                starts.insert(va);
+            }
+        }
+        let cfg = CFG::from_instructions(&module, insns)?;
+
+        // call targets are functions, too.
+        for flows in cfg.flows.flows_by_src.values() {
+            for flow in flows.iter() {
+                if let Flow::Call(Target::Direct(dst)) = flow {
+                    if cfg.insns.insns_by_address.contains_key(dst) {
+                        starts.insert(*dst);
+                    }
+                }
+            }
+        }
+        let thunks = lancelot::analysis::cfg::thunk::find_thunks(&cfg, starts.iter());
+
+        Workspace::new(module, cfg, starts, thunks, Default::default(), vec![])
+    }
+
+    fn new(
+        module: Module,
+        cfg: CFG,
+        starts: BTreeSet<VA>,
+        thunks: BTreeSet<VA>,
+        names: BTreeMap<VA, String>,
+        imports: Vec<(VA, Stub)>,
+    ) -> Result<Workspace> {
+        let decoder = dis::get_disassembler(&module)?;
 
         let mut functions: BTreeMap<VA, Function> = Default::default();
-        for &fva in ws.analysis.functions.keys() {
-            functions.insert(fva, build_function(&ws, fva));
+        for &fva in starts.iter() {
+            functions.insert(fva, build_function(&cfg, &starts, fva));
         }
 
         let mut owners: HashMap<VA, VA> = Default::default();
@@ -77,17 +179,21 @@ impl Workspace {
         }
 
         let mut callers: BTreeMap<VA, BTreeSet<VA>> = Default::default();
-        for (&src, flows) in ws.cfg.flows.flows_by_src.iter() {
+        for (&src, flows) in cfg.flows.flows_by_src.iter() {
             for flow in flows.iter() {
-                if let Flow::Call(lancelot::analysis::dis::Target::Direct(dst)) = flow {
+                if let Flow::Call(Target::Direct(dst)) = flow {
                     callers.entry(*dst).or_default().insert(src);
                 }
             }
         }
 
         Ok(Workspace {
-            ws,
+            module,
+            cfg,
             functions,
+            thunks,
+            names,
+            imports,
             owners,
             callers,
             decoder,
@@ -95,15 +201,19 @@ impl Workspace {
     }
 
     pub fn arch(&self) -> Arch {
-        self.ws.pe.module.arch
+        self.module.arch
     }
 
     pub fn module(&self) -> &Module {
-        &self.ws.pe.module
+        &self.module
+    }
+
+    pub fn cfg(&self) -> &CFG {
+        &self.cfg
     }
 
     pub fn base_address(&self) -> VA {
-        self.ws.pe.module.address_space.base_address
+        self.module.address_space.base_address
     }
 
     pub fn functions(&self) -> impl Iterator<Item = &Function> + '_ {
@@ -120,36 +230,22 @@ impl Workspace {
     }
 
     pub fn is_thunk(&self, fva: VA) -> bool {
-        self.ws
-            .analysis
-            .functions
-            .get(&fva)
-            .map(|f| f.flags.intersects(FunctionFlags::THUNK))
-            .unwrap_or(false)
+        self.thunks.contains(&fva)
     }
 
-    /// the function's name, if it's known: from FLIRT or the exports.
+    /// the function's name, if it's a recognized library function.
     pub fn name(&self, fva: VA) -> Option<&str> {
-        self.ws
-            .analysis
-            .names
-            .names_by_address
-            .get(&fva)
-            .map(|s| s.as_str())
-            .filter(|name| !name.starts_with("sub_"))
+        self.names.get(&fva).map(|s| s.as_str())
     }
 
     /// is the function recognized library code (via FLIRT)?
     pub fn is_library(&self, fva: VA) -> bool {
-        self.name(fva).is_some()
+        self.names.contains_key(&fva)
     }
 
     /// names of the library functions in the program, by address.
     pub fn library_function_names(&self) -> BTreeMap<VA, String> {
-        self.functions
-            .keys()
-            .filter_map(|&fva| self.name(fva).map(|name| (fva, name.to_string())))
-            .collect()
+        self.names.clone()
     }
 
     /// addresses of the call instructions that call the given function.
@@ -159,24 +255,11 @@ impl Workspace {
 
     /// the imports, as (address of the import table entry, API).
     pub fn imports(&self) -> Vec<(VA, Stub)> {
-        self.ws
-            .analysis
-            .imports
-            .values()
-            .map(|import| {
-                let dll = import.dll.to_lowercase();
-                let dll = dll.strip_suffix(".dll").unwrap_or(&dll).to_string();
-                let name = match &import.symbol {
-                    ImportedSymbol::Name(name) => name.clone(),
-                    ImportedSymbol::Ordinal(ord) => format!("#{ord}"),
-                };
-                (import.address, Stub { dll, name })
-            })
-            .collect()
+        self.imports.clone()
     }
 
     pub fn decode(&self, va: VA) -> Option<dis::DecodedInstruction> {
-        let buf = self.ws.pe.module.address_space.read_bytes(va, 16).ok()?;
+        let buf = self.module.address_space.read_bytes(va, 16).ok()?;
         dis::decode(&self.decoder, &buf).ok()?
     }
 
@@ -300,8 +383,7 @@ impl Workspace {
 
 /// Collect the blocks reachable from the function entry via jumps and fallthroughs,
 /// not crossing into other functions (tail calls).
-fn build_function(ws: &PEWorkspace, fva: VA) -> Function {
-    let cfg = &ws.cfg;
+fn build_function(cfg: &CFG, starts: &BTreeSet<VA>, fva: VA) -> Function {
     let mut blocks: BTreeMap<VA, BasicBlock> = Default::default();
     let mut queue = vec![fva];
 
@@ -326,10 +408,10 @@ fn build_function(ws: &PEWorkspace, fva: VA) -> Function {
                 let succ = match flow {
                     Flow::Fallthrough(va) => *va,
                     Flow::ConditionalJump(va) => *va,
-                    Flow::UnconditionalJump(lancelot::analysis::dis::Target::Direct(va)) => *va,
+                    Flow::UnconditionalJump(Target::Direct(va)) => *va,
                     _ => continue,
                 };
-                if succ != fva && ws.analysis.functions.contains_key(&succ) {
+                if succ != fva && starts.contains(&succ) {
                     // tail call
                     continue;
                 }
