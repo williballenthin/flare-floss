@@ -11,7 +11,7 @@
 //!   - the analyses, which combine the above:
 //!     `stackstrings`, `tightstrings`, `features` (which functions to emulate),
 //!     and `decoded` (emulate decoding routines).
-use std::{path::PathBuf, time::Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 
@@ -19,6 +19,7 @@ pub mod decoded;
 pub mod driver;
 pub mod emu;
 pub mod features;
+pub mod flirt;
 pub mod results;
 pub mod stackstrings;
 pub mod strings;
@@ -43,8 +44,8 @@ pub struct Options {
     pub stack_strings:   bool,
     pub tight_strings:   bool,
     pub decoded_strings: bool,
-    /// FLIRT signature files, to recognize library functions.
-    pub signatures:      Vec<PathBuf>,
+    /// FLIRT signatures, to recognize library functions (see `flirt::builtin`).
+    pub signatures:      Vec<flirt::SignatureFile>,
     /// how many of the top-scoring candidate decoding routines to emulate, at least.
     pub top_functions:   usize,
     /// after those, keep emulating more candidates until decoding has taken this long.

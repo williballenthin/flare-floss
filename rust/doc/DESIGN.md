@@ -43,11 +43,12 @@ memory, and a rule for which strings to report.
 | module | lines | role |
 |---|---|---|
 | `workspace.rs` | ~450 | the program, via lancelot |
+| `flirt.rs` | ~70 | FLIRT signatures: FLOSS's, built in, or files |
 | `emu/mod.rs` | ~800 | the emulator: address space, execution of one instruction, calls |
 | `emu/insn.rs` | ~140 | instruction classification (zydis): control flow, `rep`, `mov` to memory |
 | `emu/api.rs` | ~420 | API models (malloc, memcpy, GetProcAddress, ...) and calling conventions |
 | `emu/snapshot.rs` | ~260 | snapshots of emulator state, and memory diffs |
-| `emu/sleigh.rs` | ~50 | the embedded Ghidra SLEIGH specs that icicle compiles |
+| `emu/sleigh.rs` | ~190 | the embedded SLEIGH specs, and icicle VMs built from them |
 | `driver.rs` | ~230 | strategies: explore every path, explore to an address, run to an address |
 | `strings.rs` | ~310 | finding strings in bytes, FLOSS's junk filters |
 | `features.rs` | ~500 | scoring functions as candidate decoding routines |
@@ -78,6 +79,13 @@ specifications, lifts them to p-code, and interprets the p-code. floss-rs
 uses icicle as an instruction-semantics engine: it executes one instruction
 at a time (`Emulator::execute`), and keeps everything else, memory layout,
 calls, APIs, snapshots, under its own control.
+
+The SLEIGH specifications are open_sleigh's (a git submodule in `deps/`,
+see EVALUATION.md for why), embedded into the binary. icicle compiles
+specifications from a directory (`icicle_vm::build_with_path`); floss-rs
+compiles the embedded ones from memory with icicle's SLEIGH compiler, and
+sets up the VM the same way (`emu/sleigh.rs`), which `tests/sleigh.rs` checks
+against icicle's own. That takes ~0.3s, for each emulator.
 
 FLOSS emulates code out of context: from the start of some function, with
 no process around it, and arguments that are garbage. So the address space is
@@ -254,6 +262,21 @@ its own emulator, taking candidates in order from a shared queue. Helper threads
 start only once decoding has taken longer than they take to set up. The results
 are put back in candidate order, so the output doesn't depend on the number of
 threads (for the same candidates).
+
+## One file
+
+The floss-rs binary is self-contained: `build.rs` embeds everything it reads
+at runtime, so it needs no files and writes none.
+
+  - the x86 SLEIGH specifications (2.3MB), from `deps/open_sleigh`;
+  - FLOSS's FLIRT signatures (15MB, used with `--flirt`), from `floss/sigs`;
+  - the table of Windows API calling conventions (`build_apis.rs`), from `deps/win32json` and `deps/phnt`.
+
+Built for `x86_64-unknown-linux-musl`, it's also statically linked, so it runs
+on any Linux, whatever its C library. musl's allocator made it 70% slower than
+the glibc build, so a static build uses mimalloc, which leaves it ~10% slower
+(40 capa test files: 91s with glibc, 100s static). The `dist` profile leaves out
+debug information: the static binary is 28MB, of which 15MB is the signatures.
 
 ## Choices, and what they cost
 

@@ -27,12 +27,6 @@ pub fn generate(root: &Path, out: &Path) {
     let phnt = root.join("deps").join("phnt");
     let overrides = root.join("data").join("apis-x86-overrides.tsv");
     for dir in [&win32json, &phnt] {
-        if !dir.is_dir() {
-            panic!(
-                "{} is missing: run `git submodule update --init rust/deps/win32json rust/deps/phnt`",
-                dir.display()
-            );
-        }
         println!("cargo:rerun-if-changed={}", dir.display());
     }
     println!("cargo:rerun-if-changed={}", overrides.display());

@@ -4,7 +4,8 @@ A port of [FLOSS](https://github.com/mandiant/flare-floss), the FLARE
 Obfuscated String Solver, to Rust. It uses
 [lancelot](https://github.com/williballenthin/lancelot) for program analysis and
 [icicle](https://github.com/icicle-emu/icicle-emu) (MIT/Apache-2.0) for x86/x64
-emulation, with Ghidra's SLEIGH specifications (Apache-2.0) embedded.
+emulation, with SLEIGH specifications (Apache-2.0) from
+[open_sleigh](https://github.com/Garfield1002/open_sleigh) embedded.
 
 Status: research prototype. It passes FLOSS's test suite, finds strings that
 FLOSS misses, and is 20-100x faster. See:
@@ -13,12 +14,24 @@ FLOSS misses, and is 20-100x faster. See:
   - [doc/EVALUATION.md](doc/EVALUATION.md): correctness, speed, and what icicle can and can't do.
 
 ```
-git submodule update --init rust/deps/win32json rust/deps/phnt
+git submodule update --init rust/deps
 cargo build --release
 ./target/release/floss-rs sample.exe
 ./target/release/floss-rs -j sample.exe > results.json
 ./target/release/floss-rs -f sc32 shellcode.bin
 ```
+
+The binary is self-contained: the data it uses is built in (see
+[DESIGN.md](doc/DESIGN.md#one-file)). For one that runs on any Linux,
+link it statically with musl (zydis, in lancelot, needs `musl-gcc`: Debian's `musl-tools`):
+
+```
+rustup target add x86_64-unknown-linux-musl
+cargo build --profile dist --target x86_64-unknown-linux-musl
+./target/x86_64-unknown-linux-musl/dist/floss-rs sample.exe
+```
+
+That's a 28MB file, about 10% slower than the glibc build.
 
 Useful options:
 
@@ -28,8 +41,9 @@ Useful options:
     `0` emulates exactly FLOSS's set, for reproducible output. See
     [EVALUATION.md](doc/EVALUATION.md#how-long-to-emulate-decoding-routines) for how the default was chosen.
   - `--top-functions N` (default 20): the minimum number of candidates to emulate.
-  - `--signatures PATH`: FLIRT signatures (`.sig`/`.pat`, or a directory of them)
-    to recognize library functions. Off by default: loading FLOSS's signatures takes ~5s.
+  - `--flirt`: recognize library functions with FLOSS's FLIRT signatures, which are
+    built in. Off by default: loading them takes ~5s.
+  - `--signatures PATH`: other FLIRT signatures (`.sig`/`.pat`, or a directory of them) to use instead.
   - `--threads N` (default: the number of CPUs): threads for emulation, on larger files.
     Each takes memory for the code it lifts (about 200MB for a program of 1,400 functions).
   - `RUST_LOG=floss=debug`: see what the emulator is doing.
@@ -44,13 +58,14 @@ src/
   main.rs            command line
   lib.rs             the pipeline: analyze a file, return results
   workspace.rs       the program, via lancelot
+  flirt.rs           FLIRT signatures
   emu/               the emulator: icicle in a forgiving address space
     mod.rs             address space, executing instructions, calls
     insn.rs            instruction classification
     api.rs             API models and calling conventions
     snapshot.rs        snapshots and memory diffs
     x86.rs             x86 instructions icicle leaves unimplemented
-    sleigh.rs          embedded SLEIGH specifications
+    sleigh.rs          embedded SLEIGH specifications, compiled from memory
   driver.rs          strategies: explore every path, run to an address
   strings.rs         finding strings, filtering junk
   features.rs        ranking candidate decoding routines
@@ -59,8 +74,8 @@ src/
   decoded.rs         decoded strings
 build_apis.rs        generates Windows API calling conventions, from deps/
 data/                corrections to them
-deps/                submodules: win32json (win32metadata as JSON), phnt (native API headers)
-sleigh/x86/          Ghidra's x86 SLEIGH specifications
+deps/                submodules: open_sleigh (SLEIGH specifications),
+                     win32json (win32metadata as JSON), phnt (native API headers)
 tests/               unit tests against Python FLOSS's string functions,
                      and end-to-end tests on programs in tests/programs
 examples/            inspect (what lancelot sees), bench, difftest (vs Unicorn)

@@ -13,11 +13,14 @@ use lancelot::{
     aspace::{AddressSpace, RelativeAddressSpace},
     loader::pe::PE,
     module::Module,
-    workspace::{config::DynamicConfiguration, FunctionFlags, PEWorkspace},
+    workspace::{FunctionFlags, PEWorkspace},
     VA,
 };
 
-use crate::emu::Stub;
+use crate::{
+    emu::Stub,
+    flirt::{SignatureFile, Signatures},
+};
 
 #[derive(Debug, Clone)]
 pub struct BasicBlock {
@@ -66,10 +69,9 @@ pub struct Workspace {
 
 impl Workspace {
     /// Load a PE file. FLIRT signatures are optional.
-    pub fn from_pe(buf: &[u8], sigs: &[std::path::PathBuf]) -> Result<Workspace> {
+    pub fn from_pe(buf: &[u8], sigs: &[SignatureFile]) -> Result<Workspace> {
         let pe = PE::from_bytes(buf)?;
-        let config = DynamicConfiguration::default().with_sig_paths(sigs);
-        let ws = PEWorkspace::from_pe(Box::new(config), pe)?;
+        let ws = PEWorkspace::from_pe(Box::new(Signatures(sigs.to_vec())), pe)?;
 
         let thunks = ws
             .analysis

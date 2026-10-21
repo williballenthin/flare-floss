@@ -3,6 +3,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 
+/// in a static build, musl's allocator makes floss-rs 70% slower, and mimalloc 10%.
+/// (with glibc, its allocator is a little faster than mimalloc.)
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum StringType {
     Static,
@@ -45,7 +51,11 @@ struct Args {
     #[arg(long, value_enum, num_args = 1..)]
     no: Vec<StringType>,
 
-    /// FLIRT signature files (.sig/.pat) or directories of them, to recognize library functions
+    /// recognize library functions with FLOSS's FLIRT signatures, which are built in (loading them takes ~5s)
+    #[arg(long)]
+    flirt: bool,
+
+    /// recognize library functions with these FLIRT signature files (.sig/.pat), or directories of them, instead
     #[arg(long)]
     signatures: Vec<PathBuf>,
 
@@ -111,7 +121,16 @@ fn main() -> Result<()> {
         stack_strings: enabled(StringType::Stack),
         tight_strings: enabled(StringType::Tight),
         decoded_strings: enabled(StringType::Decoded),
-        signatures: expand_signatures(&args.signatures)?,
+        signatures: if !args.signatures.is_empty() {
+            expand_signatures(&args.signatures)?
+                .iter()
+                .map(|path| floss::flirt::SignatureFile::read(path))
+                .collect::<Result<_>>()?
+        } else if args.flirt {
+            floss::flirt::builtin()
+        } else {
+            vec![]
+        },
         top_functions: args.top_functions,
         threads: args.threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)),
         time_budget: std::time::Duration::from_secs_f64(args.time_budget.max(0.0)),

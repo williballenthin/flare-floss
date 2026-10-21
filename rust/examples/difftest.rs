@@ -233,8 +233,7 @@ fn run(cases_path: &str, out: &str) -> Result<()> {
             optimize_block: false,
             ..Default::default()
         };
-        let mut vm = icicle_vm::build_with_path(&config, &floss::emu::sleigh::processors_dir()?)
-            .map_err(|e| anyhow!("{e}"))?;
+        let mut vm = floss::emu::sleigh::build_vm(&config)?;
         // each case has its own address, so there's no stale code to detect.
         vm.cpu.mem.detect_self_modifying_code = false;
         // the code region is zeros, except for the instruction under test.

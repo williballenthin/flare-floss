@@ -363,7 +363,7 @@ and interprets the p-code (or JITs it with cranelift). FLOSS needs:
 | handle faults and keep exploring other paths | yes: faults are exits with a code and address |
 | intercept API calls | done in floss-rs (stubs), no icicle support needed |
 | a permissive license | yes |
-| no Ghidra installation | the specs (1.9MB) are embedded, and compiled at startup in ~0.3s |
+| no Ghidra installation | the specs (2.3MB) are embedded, and compiled from memory at startup in ~0.3s |
 
 ### Differential testing against Unicorn
 
@@ -374,21 +374,45 @@ runs the same cases with Unicorn (QEMU) and compares registers, flags, SSE
 registers, and memory. (Unicorn is GPL; it's only a test oracle here.)
 
 Of 186,338 cases that ran on both (62k faulted in both, from random pointers),
-**186,173 match (99.91%)**, after excluding the AF flag. The differences
+**186,184 match (99.94%)**, including the AF flag. The differences
 (`scripts/difftest-report.txt`):
 
 | difference | cases | matters for FLOSS? |
 |---|---|---|
-| AF isn't computed by arithmetic instructions (Ghidra's SLEIGH: "AF not implemented") | all arithmetic | no: only BCD instructions and `pushf` read it |
 | `div`/`idiv` don't raise #DE when the quotient overflows | 68 | no |
-| `pcmpistri`, `psraw` (immediate form), `sysret` aren't implemented | 18 | rarely: `pcmpistri` is in optimized `strlen` |
+| `pcmpistri` and `sysret` aren't implemented | 16 | rarely: `pcmpistri` is in optimized `strlen` |
 | `cvttsd2si`/`cvttss2si` saturate instead of returning the "integer indefinite" value | 10 | no |
-| 32-bit `xchg` with memory doesn't zero the upper half of RAX (x64) | 16 | rarely |
 | MXCSR starts at 0, not 0x1f80 | 14 | no; floss-rs sets it |
+| `daa`/`das` set the parity flag wrong | 7 | no |
 | `aam`/`aad` flags, `push`/`pop` of segment registers | 32 | no |
 
 Excluded from the test: control flow (tested by the FLOSS tests),
 system instructions, x87, and VEX/EVEX encodings (Unicorn's QEMU doesn't support AVX).
+
+### Which SLEIGH specifications
+
+The specifications come from [open_sleigh](https://github.com/Garfield1002/open_sleigh),
+a repository of Ghidra's SLEIGH specifications with community fixes that
+upstream hasn't merged yet, pinned at `b77bd7d` (June 2026). At that commit, its
+x86 is Ghidra 12.1's, plus pending upstream fixes (from Sleigh-InSPECtor:
+REX and address-size prefixes, upper halves of 64-bit registers, `xadd`, ...),
+icicle's own patches to Ghidra's x86 (`cpuid`, `psraw`, `pmulhw`, `packssdw`, ...),
+and the AF flag. Compared with Ghidra's own x86, at its latest commit (`b8e9917`):
+
+| | Ghidra `b8e9917` | open_sleigh `b77bd7d` |
+|---|---|---|
+| difftest: match / mismatch / fault differs | 186,173 / 125 / 40, without AF | **186,184 / 116 / 38, with AF** |
+| fixed | | `xchg` (16), `psraw` (2), AF (all arithmetic) |
+| broken | | parity after `daa`/`das` (7) |
+| `cpuid` | reads its result from address 0 (icicle warns "unpatched SLEIGH specification") | returns a vendor and features |
+| FLOSS tests, `tests/programs` | pass | pass |
+| capa-testfiles, `--time-budget 0` | | the same strings, plus the `cpuid` vendor (`GenuntelineI`, as `__cpuid` stores it) in 14 of 308 programs |
+| size of the submodule | 325MB checkout | 17MB |
+
+Later open_sleigh commits rewrite x86 in ways icicle can't run: port I/O,
+MSRs, and the x87 register stack become separate address spaces (icicle
+supports one RAM space), with new p-code operations, and variables named `signed` and
+`defined`, which icicle's parser reserves. So the pin stays at `b77bd7d` until icicle catches up.
 
 ### What real malware runs into
 
@@ -423,7 +447,7 @@ and ends the run when emulating a decoder.
 | stepping off a breakpoint doesn't advance | use `step(1)`, no breakpoints | — |
 | `hlt` loops forever (Ghidra's semantics) | treat as a trap | — |
 | user-ops without implementations (AVX, SSE4.2 strings, AES) | implement `pshufb`, report no AVX | yes, or in SLEIGH |
-| specs must be files on disk | embed and write to a temp directory | an API to compile from memory (sleigh-compile has one) |
+| `build_with_path` reads the specs from files on disk | compile the embedded specs from memory with icicle's SLEIGH compiler, and set up the VM like `build_with_path` (`emu/sleigh.rs`, checked by `tests/sleigh.rs`) | yes: a `build_with_path` that takes the files' contents |
 
 ### Alternatives
 

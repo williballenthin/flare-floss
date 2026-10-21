@@ -21,9 +21,19 @@ smallvec = "1"
 
 # lancelot: PE loading, disassembly, control flow, FLIRT
 lancelot = { git = "https://github.com/williballenthin/lancelot", rev = "7dd6b4389f929e4b4cb5a1118ca8f50396ae0925" }
+lancelot-flirt = { git = "https://github.com/williballenthin/lancelot", rev = "7dd6b4389f929e4b4cb5a1118ca8f50396ae0925" }
 # icicle: the emulator (MIT/Apache-2.0); instruction semantics from Ghidra's SLEIGH specs
 icicle-vm = { git = "https://github.com/icicle-emu/icicle-emu", rev = "638508b72f480f9be6fe2e267ef09de8f1541f9a" }
 pcode = { git = "https://github.com/icicle-emu/icicle-emu", rev = "638508b72f480f9be6fe2e267ef09de8f1541f9a" }
+# icicle's SLEIGH compiler, to build the VM from the embedded specifications (see src/emu/sleigh.rs)
+sleigh-parse = { git = "https://github.com/icicle-emu/icicle-emu", rev = "638508b72f480f9be6fe2e267ef09de8f1541f9a" }
+sleigh-compile = { git = "https://github.com/icicle-emu/icicle-emu", rev = "638508b72f480f9be6fe2e267ef09de8f1541f9a", features = ["ldefs"] }
+serde-xml-rs = "0.8"
+target-lexicon = "0.13"
+
+# the allocator for static builds: musl's makes floss-rs 70% slower (see src/main.rs).
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
 
 [build-dependencies]
 regex = "1"
@@ -31,6 +41,12 @@ serde_json = "1"
 
 [profile.release]
 debug = 1
+
+# a binary to copy around: no debug information.
+[profile.dist]
+inherits = "release"
+debug = false
+strip = true
 
 [profile.dev]
 opt-level = 1

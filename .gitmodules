@@ -9,3 +9,7 @@
 	path = rust/deps/phnt
 	url = https://github.com/winsiderss/phnt.git
 	shallow = true
+[submodule "rust/deps/open_sleigh"]
+	path = rust/deps/open_sleigh
+	url = https://github.com/Garfield1002/open_sleigh.git
+	shallow = true

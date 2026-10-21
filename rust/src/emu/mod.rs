@@ -383,8 +383,7 @@ impl Emulator {
             optimize_block: false,
             ..Default::default()
         };
-        let mut vm = icicle_vm::build_with_path(&config, &sleigh::processors_dir()?)
-            .map_err(|e| anyhow!("failed to build icicle VM: {e}"))?;
+        let mut vm = sleigh::build_vm(&config)?;
 
         let regs = Registers::new(&vm, arch)?;
         let decoder = lancelot::analysis::dis::get_disassembler(ws.module())?;
