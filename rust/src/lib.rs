@@ -123,7 +123,7 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
     }
     doc.metadata.runtime.find_features = seconds(t);
 
-    // strings that the stack string pass found constructed in global memory;
+    // strings that the stack and tight string passes found in global memory or the heap;
     // reported with the decoded strings.
     let mut constructed_global_strings = vec![];
     if opts.stack_strings {
@@ -151,7 +151,10 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
             .map(|f| (f.va, f.tight_loops()))
             .collect();
         doc.analysis.functions_analyzed_tight_strings = functions.len();
-        doc.strings.tight_strings = tightstrings::extract_tightstrings(&ws, &mut emu, &functions, opts.min_length);
+        let (tight_strings, decoded_strings) =
+            tightstrings::extract_tightstrings(&ws, &mut emu, &functions, opts.min_length);
+        doc.strings.tight_strings = tight_strings;
+        constructed_global_strings.extend(decoded_strings);
         doc.metadata.runtime.tight_strings = seconds(t);
     }
 

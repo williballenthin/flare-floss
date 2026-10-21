@@ -1,20 +1,18 @@
 //! Tight strings: stack strings that are decoded in place by a tight loop.
 //!
 //! For each tight loop: explore the function until reaching the loop,
-//! note the strings already on the stack, then run the loop
-//! (with a budget) and look for new strings on the stack.
+//! then run the loop (with a budget), and look for strings in the memory it wrote.
 //!
-//! This is FLOSS's `tightstrings.py`.
-use std::collections::HashSet;
-
+//! This is like FLOSS's `tightstrings.py`, which looks for strings on the stack
+//! after the loop that weren't there before it. Diffing memory finds those too,
+//! plus strings the loop decodes into global memory or the heap.
 use lancelot::VA;
 
 use crate::{
     driver::{self, Limits},
-    emu::{CallPolicy, Emulator, ExecOptions},
+    emu::{snapshot::Region, CallPolicy, Emulator, ExecOptions},
     features::TightLoop,
-    results::TightString,
-    stackstrings::StackContext,
+    results::{AddressType, DecodedString, TightString},
     strings,
     workspace::Workspace,
 };
@@ -23,11 +21,11 @@ const MAX_INSN_COUNT: u64 = 10_000;
 const MAX_ADDRESS_REVISITS: u32 = 300;
 
 pub fn extract_tightstrings(
-    _ws: &Workspace,
+    ws: &Workspace,
     emu: &mut Emulator,
     functions: &[(VA, Vec<TightLoop>)],
     min_length: usize,
-) -> Vec<TightString> {
+) -> (Vec<TightString>, Vec<DecodedString>) {
     let opts = ExecOptions {
         calls:      CallPolicy::StepOver,
         api_models: false,
@@ -38,40 +36,56 @@ pub fn extract_tightstrings(
         max_hits:  MAX_ADDRESS_REVISITS,
     };
 
-    let mut results = vec![];
+    let mut tight = vec![];
+    let mut decoded = vec![];
     for (fva, loops) in functions {
+        let mut seen = ws.referenced_strings(*fva);
         for tl in loops {
             emu.reset(*fva);
             let init_sp = emu.sp();
 
-            let t0 = std::time::Instant::now();
             if !driver::explore_to(emu, &opts, tl.start) {
                 log::debug!("tightstrings: didn't reach loop at {:#x} in {fva:#x}", tl.start);
                 continue;
             }
 
-            // strings already on the stack before the loop runs aren't decoded by it.
-            let before: HashSet<String> = match StackContext::capture(emu, tl.start, init_sp) {
-                Some(ctx) => strings::extract_strings(&ctx.stack, min_length, &Default::default())
-                    .into_iter()
-                    .map(|s| s.string)
-                    .collect(),
-                None => Default::default(),
-            };
-
-            let t1 = std::time::Instant::now();
+            let before = emu.memory();
             let end = driver::run_to(emu, &opts, tl.end, &limits, &mut driver::Nothing);
-            log::debug!(
-                "tightstrings: loop at {:#x} in {fva:#x}: {end:?}, explore {:?}, run {:?}",
-                tl.start,
-                t1 - t0,
-                t1.elapsed()
-            );
+            log::debug!("tightstrings: loop at {:#x} in {fva:#x}: {end:?}", tl.start);
+            let after = emu.memory();
+            let sp = emu.sp();
 
-            if let Some(ctx) = StackContext::capture(emu, tl.start, init_sp) {
-                results.extend(ctx.strings(*fva, min_length, &before, emu.pointer_size()));
+            // the strings the loop wrote to: on the stack, these are tight strings;
+            // elsewhere (which FLOSS doesn't look for), they're decoded strings.
+            for change in after.changes_since(&before, None) {
+                for (va, s) in strings::strings_touching(&after, &change, min_length, &seen) {
+                    if !seen.insert(s.string.clone()) {
+                        continue;
+                    }
+                    if change.region == Region::Stack {
+                        tight.push(TightString {
+                            function:               *fva,
+                            string:                 s.string,
+                            encoding:               s.encoding,
+                            program_counter:        tl.start,
+                            stack_pointer:          sp,
+                            original_stack_pointer: init_sp,
+                            offset:                 va.wrapping_sub(sp),
+                            frame_offset:           init_sp.wrapping_sub(va).wrapping_sub(emu.pointer_size()),
+                        });
+                    } else {
+                        decoded.push(DecodedString {
+                            address:          va,
+                            address_type:     AddressType::from(change.region),
+                            string:           s.string,
+                            encoding:         s.encoding,
+                            decoded_at:       tl.start,
+                            decoding_routine: *fva,
+                        });
+                    }
+                }
             }
         }
     }
-    results
+    (tight, decoded)
 }
