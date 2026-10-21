@@ -31,3 +31,28 @@ The scripts behind "How long to emulate decoding routines" in `doc/EVALUATION.md
 Strings count as *novel* if they're not in the file as-is and not mostly static text
 from the file, and as *meaningful* if they're also at least 6 characters, mostly letters,
 and not repetitive (`sim.py`).
+
+## ranking candidates
+
+The scripts behind "Ranking candidates" in `doc/EVALUATION.md`.
+
+1. Dump the features of every candidate, one JSON-lines file per sample:
+
+       cargo build --release --example candidate_features
+       for f in $(cat files.txt); do ../../target/release/examples/candidate_features "path/to/capa-testfiles/$f" > "features/$f.jsonl"; done
+
+2. Compare features and scores against what each routine found (with `$BUDGET_DATA` as above):
+
+       export FEATURES_DIR=features
+       python3 features_study.py features words   # how well each feature ranks a file's routines
+       python3 hand_scores.py words               # FLOSS's score, with one change at a time
+       python3 score_study.py words               # cross-validated models (needs numpy, scikit-learn)
+       python3 fit_score.py words                 # a small linear score fitted on half of the files
+
+   `words` are the *text-like* strings: novel, meaningful, and reading like text by
+   a character trigram model of the samples' static strings (`sim.Trigrams`).
+
+3. `floss-size-score.patch` is the new score for Python FLOSS (against v4.0.0a2).
+   To compare Python FLOSS runs (decoded strings) with and without it:
+
+       python3 py_compare.py run-without/ run-with/

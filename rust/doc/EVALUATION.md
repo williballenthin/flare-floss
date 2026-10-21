@@ -192,6 +192,8 @@ meaningful strings, ranks 21-50 give 40%, and ranks beyond 200 still give 22%.
 On FLOSS's score, candidates are ranked only a little better than random (at
 a 2s budget: 87% vs 79%), but an ideal order would find every string in 0.5s
 per file: the routines that decode strings are few and cheap, and hard to spot.
+(This led to a better ranking; see "Ranking candidates" below. The numbers in
+this section are for FLOSS's ranking.)
 
 **Signals that might tell when to stop, or what to emulate first:**
 
@@ -202,7 +204,7 @@ per file: the routines that decode strings are few and cheap, and hard to spot.
 | relative or absolute score floors | worse than budgets at every cost |
 | did the top 20 find strings? | if so, 56% of files find more later; if not, 19%, but those files hold 44% of the later strings. "2s, or 20s if the top found strings" gets 99.0% at 3.2s mean, vs a 10s budget's 98.7% at 3.0s |
 | budgets that scale with the file (per candidate, or proportional to the rest of the analysis) | on the same curve |
-| a learned ranking from the candidates' features (logistic regression, gradient boosting) | predicts poorly (AUC 0.72-0.75; the FLOSS score alone: 0.46 across files), and orders candidates no better than the score at small budgets |
+| a learned ranking from FLOSS's features (logistic regression, gradient boosting) | orders candidates little better than the score at small budgets (but see "Ranking candidates": with other features, a simpler score does better) |
 
 None of the signals beats spending the time, so the budget stays a plain time
 limit, and the improvement is in how much work fits in it: candidates are
@@ -229,6 +231,119 @@ for example ransom note text, a Monero wallet registry key, a Bitcoin
 `wallet.dat` path, the `root\SecurityCenter2` WMI namespace, and DNS-over-HTTPS
 queries. 45% of the added strings are meaningful; the rest are noise like
 format strings filled in with garbage (`Runtime error 254 at 00452E57`).
+
+## Ranking candidates
+
+Which candidates come first decides what FLOSS finds with its top 20, and what
+floss-rs finds when the time budget runs out. FLOSS ranks candidates by a score
+that predicts poorly which ones decode strings: with the top 20, it finds 39% of
+the strings that emulating every candidate finds.
+
+**The score.** FLOSS's score is the weighted average of its features' scores:
+block and instruction counts, arguments, callers, loops and tight loops, and one
+feature for each non-zeroing `xor`, shift, and `mov` to memory through a register.
+floss-rs computes it as FLOSS's code does (recomputing it from the features
+gives the same ranking); against Python FLOSS on the same files, half of the
+scores agree within 0.01 and the rest differ because vivisect and lancelot find
+slightly different blocks, instructions, and callers.
+
+**What decodes strings.** The routines that find the most strings are of a few kinds:
+
+  - functions that coordinate: big, with many calls, often called by nothing
+    (entry points, thread routines). Emulating one runs the decoders it calls,
+    once per string. FLOSS ranks these low (161st, of 203, for one that finds 11
+    of its file's 12 strings);
+  - small decoders called from many places, often with buffers on the caller's
+    stack; and families that decode each string with its own small function
+    (Conti: one 26-43 instruction function, with a loop over bytes, per string);
+  - while FLOSS's top-ranked functions are often unrolled hashing or crypto,
+    with hundreds of `xor`s, and find nothing: the average over every `xor`
+    and `mov` puts them first.
+
+The right 20 candidates would find 99% of each file's meaningful strings, and
+most of them (1,342 of 2,144) are found by only one routine: the task is to spot those.
+
+**The study.** `examples/candidate_features` computes FLOSS's features and others
+for every candidate: what the callers pass (pointers to data, text, zeros, or the
+stack; small constants), whether an API is called with the result, calls out
+(to APIs, to functions with loops, to one function repeatedly), what the
+function reaches through its calls, and what its loops do (byte accesses, xors
+with constants, arithmetic, writes through pointers). Joined with what each
+routine found in the all-candidates run, `scripts/budget/` measures how well
+each ranks the candidates of a file (the AUC within each file, averaged), and
+what each score finds with the top 20 and within time budgets. For this, strings
+are also checked for reading like text (*text-like*: a character trigram model
+of the corpus's static strings, which rejects junk like `fUAMwBEIszZgD` that the
+*meaningful* filter lets through).
+
+| feature (for meaningful strings) | AUC within files |
+|---|---|
+| instructions | 0.71 |
+| byte accesses to memory | 0.69 |
+| instructions in loops | 0.66 |
+| calls to functions with loops | 0.66 |
+| calls out | 0.65 |
+| byte accesses in loops | 0.65 |
+| FLOSS's score | 0.63 |
+| what the callers pass, what's done with the result | 0.50-0.56 |
+
+The call-site features, which seemed the most promising, predict almost nothing.
+Size predicts best: emulating a function runs the code it calls, so bigger
+functions find more. Changing FLOSS's formula to count each kind of feature once,
+rather than once per instruction, makes it worse: the per-instruction counts
+were working as a measure of size.
+
+**Scores, on all native capa files** (share of each file's text-like strings found):
+
+| score | top 20 | top 50 | 0.25s | 0.5s | 1s | 2s |
+|---|---|---|---|---|---|---|
+| FLOSS's score | 38.7% | 60.5% | 56.4% | 67.2% | 79.2% | 83.6% |
+| instructions | 50.0% | 63.4% | 64.4% | 74.4% | 86.1% | 89.6% |
+| **log(1 + instructions) + log(1 + byte accesses in loops)** | **51.8%** | 62.8% | 63.1% | 76.3% | 84.5% | 91.5% |
+| logistic regression, all features (cross-validated) | 47.5% | 65.7% | 61.0% | 77.5% | 85.6% | 88.1% |
+| gradient boosting, all features (cross-validated) | 57.3% | 70.3% | 63.3% | 74.0% | 85.9% | 88.3% |
+| gradient boosting, FLOSS's features (cross-validated) | 51.9% | 63.3% | 64.8% | 75.3% | 80.9% | 88.7% |
+
+A model of all the features does best with the top 20, but no better within a
+time budget, and it's 200 trees over about 40 features; a linear score fitted to half
+of the files does better on that half and worse on the other. The two-feature
+score gets most of the gain, wasn't fitted to the data, and is easy to compute
+anywhere. It beats FLOSS's score on both halves of the files, for text-like,
+meaningful, and novel strings, by 3-16 points with the top 20, with top 20s that
+take no longer to emulate.
+
+**Real runs** of floss-rs with each ranking, scored against emulating every candidate
+(text-like / meaningful / novel strings):
+
+| | FLOSS's ranking | the new ranking | mean time |
+|---|---|---|---|
+| `--time-budget 0` (the top 20) | 38.7% / 41.1% / 39.6% | **51.8% / 47.4% / 43.1%** | 1.2s, both |
+| 1 thread, 1s budget | 79.4% / 81.2% / 82.5% | **87.9% / 87.2% / 86.8%** | 1.6s, both |
+| 4 threads, 5s (the default) | 99.5% / 99.5% / 99.0% | **100% / 99.8% / 99.3%** | 2.0s / 2.1s |
+
+floss-rs now ranks candidates this way, and reports FLOSS's score too (`floss_score`).
+
+**For Python FLOSS.** `scripts/budget/floss-size-score.patch` makes the same change
+to FLOSS (`identify.py` and `features/extract.py`): it ranks by the new score,
+and keeps the old one as `weighted_score`. In FLOSS, functions that nothing calls
+have no call contexts and are never emulated, so replaying FLOSS's setting means
+crediting them with nothing; there, ranking by the new score (among called
+functions) finds 53% of the text-like strings with the top 20, where FLOSS's
+score finds 38%.
+Python FLOSS with the patch, on the 40-file subset (decoded strings only; the
+rest of FLOSS is unchanged):
+
+| | novel | meaningful | text-like | text-like strings of the all-candidates run found, per file |
+|---|---|---|---|---|
+| FLOSS | 452 | 300 | 272 | 11.2% |
+| FLOSS with the patch | 446 | 313 | 288 | 21.0% |
+
+In 35 of the 40 files the text-like strings are the same; 4 files gain and 1
+loses. The 3 strings only FLOSS's score finds are junk (`Jmountain`,
+`Jmounta#$`, `mountain`); the 19 only the new score finds include `Iphlpapi.dll`,
+`Rstrtmgr.dll`, `RmShutdown`, API names, a list of language names, and a Conti
+`net stop` command. The gain is real but small on this subset, where most files'
+decoding routines are either in both top 20s or in neither.
 
 ## icicle
 
