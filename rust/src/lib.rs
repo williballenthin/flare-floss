@@ -52,7 +52,7 @@ pub struct Options {
     pub time_budget:     std::time::Duration,
     /// only analyze these functions.
     pub functions:       Option<Vec<u64>>,
-    /// threads for stack and tight string extraction.
+    /// threads for emulation, on larger files.
     pub threads:         usize,
 }
 
@@ -67,7 +67,7 @@ impl Default for Options {
             decoded_strings: true,
             signatures:      vec![],
             top_functions:   20,
-            time_budget:     std::time::Duration::from_secs(2),
+            time_budget:     std::time::Duration::from_secs(5),
             functions:       None,
             threads:         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
         }
@@ -221,7 +221,7 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
         let t = Instant::now();
         let candidates = features::rank_decoding_functions(&features, opts.top_functions);
         let (decoded_strings, routines) =
-            decoded::decode_strings(&ws, &mut emu, &candidates, opts.time_budget, opts.min_length);
+            decoded::decode_strings(&ws, &mut emu, &candidates, opts.time_budget, opts.min_length, opts.threads);
         doc.strings.decoded_strings = decoded_strings;
         doc.analysis.decoding_candidates = candidates.required.len() + candidates.extra.len();
         doc.analysis.functions_analyzed_decoded_strings = routines.len();

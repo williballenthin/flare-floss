@@ -11,6 +11,10 @@
 //! This is FLOSS's `string_decoder.py`, `function_argument_getter.py`, and `decoding_manager.py`.
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -159,61 +163,121 @@ fn should_shortcut(n: usize, n_calls: usize, found_strings: usize) -> bool {
     n >= threshold && found_strings <= FUNCTION_MIN_DECODED_STRINGS
 }
 
+/// Once decoding has taken this long, start helper threads.
+/// It's about what a helper's emulator takes to set up, so small files don't pay for helpers.
+const HELPERS_AFTER: Duration = Duration::from_millis(300);
+
 /// Emulate the candidate decoding routines and collect the strings they decode:
 /// all the required candidates, then extra candidates until `budget` is spent.
-/// Returns the strings, and the routines that were emulated.
+/// Returns the strings, and the routines that were emulated, in the order of the candidates.
+///
+/// Routines are independent, so they can be emulated on several threads (each with its own
+/// emulator), taking candidates in order from a shared queue.
 pub fn decode_strings(
     ws: &Workspace,
     emu: &mut Emulator,
     candidates: &Candidates,
     budget: Duration,
     min_length: usize,
+    threads: usize,
 ) -> (Vec<DecodedString>, Vec<DecodingRoutine>) {
     let t0 = Instant::now();
-    let mut results = vec![];
-    let mut routines = vec![];
-    let mut decode = |routine: VA, required: bool, results: &mut Vec<DecodedString>, routines: &mut Vec<DecodingRoutine>| {
+    let queue: Vec<(VA, bool)> = candidates
+        .required
+        .iter()
+        .map(|&va| (va, true))
+        .chain(candidates.extra.iter().map(|&va| (va, false)))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let done: Vec<Mutex<Option<(Vec<DecodedString>, DecodingRoutine)>>> = queue.iter().map(|_| Default::default()).collect();
+
+    // the next candidate to emulate: required ones always, extra ones while there's time.
+    let take = || -> Option<usize> {
+        let i = next.fetch_add(1, Ordering::Relaxed);
+        let &(_, required) = queue.get(i)?;
+        if !required {
+            let elapsed = t0.elapsed();
+            if elapsed >= budget {
+                return None;
+            }
+            if i == candidates.required.len() {
+                log::info!(
+                    "emulated the top {i} candidate decoding routines in {:.1}s; \
+                     emulating more candidates, up to the {:.1}s time budget, for more thorough results",
+                    elapsed.as_secs_f64(),
+                    budget.as_secs_f64()
+                );
+            }
+        }
+        Some(i)
+    };
+    let decode = |emu: &mut Emulator, i: usize| {
+        let (routine, required) = queue[i];
         let t = Instant::now();
         let (strings, calls) = decode_routine(ws, emu, routine, min_length);
-        routines.push(DecodingRoutine {
+        let f = &candidates.features[&routine];
+        let report = DecodingRoutine {
             address: routine,
-            score: candidates.features[&routine].score,
+            score: f.score,
             required,
             calls,
             strings: strings.len(),
             seconds: t.elapsed().as_secs_f64(),
-            features: candidates.features[&routine].summary(),
-        });
-        results.extend(strings);
+            features: f.summary(),
+        };
+        *done[i].lock().unwrap() = Some((strings, report));
     };
 
-    for &routine in candidates.required.iter() {
-        decode(routine, true, &mut results, &mut routines);
-    }
-
-    let elapsed = t0.elapsed();
-    if elapsed < budget && !candidates.extra.is_empty() {
-        log::info!(
-            "emulated the top {} candidate decoding routines in {:.1}s; \
-             emulating more candidates, up to the {:.1}s time budget, for more thorough results",
-            routines.len(),
-            elapsed.as_secs_f64(),
-            budget.as_secs_f64()
-        );
-        let required = results.len();
-        for &routine in candidates.extra.iter() {
-            if t0.elapsed() >= budget {
-                break;
+    let mut helpers_used = 0;
+    std::thread::scope(|scope| {
+        let mut helpers = vec![];
+        while let Some(i) = take() {
+            decode(emu, i);
+            if helpers.is_empty() && threads > 1 && t0.elapsed() >= HELPERS_AFTER && next.load(Ordering::Relaxed) < queue.len() {
+                helpers = (1..threads)
+                    .map(|_| {
+                        scope.spawn(|| -> anyhow::Result<crate::emu::Stats> {
+                            let mut emu = Emulator::new(ws)?;
+                            while let Some(i) = take() {
+                                decode(&mut emu, i);
+                            }
+                            Ok(emu.stats)
+                        })
+                    })
+                    .collect();
             }
-            decode(routine, false, &mut results, &mut routines);
         }
+        helpers_used = helpers.len();
+        for helper in helpers {
+            match helper.join().expect("decoding thread panicked") {
+                Ok(stats) => emu.stats.merge(&stats),
+                Err(e) => log::warn!("decoding thread failed to start: {e}"),
+            }
+        }
+    });
+
+    let mut results = vec![];
+    let mut routines = vec![];
+    for (strings, report) in done.into_iter().filter_map(|d| d.into_inner().unwrap()) {
+        results.extend(strings);
+        routines.push(report);
+    }
+    if routines.len() > candidates.required.len() {
+        let required = routines[..candidates.required.len()].iter().map(|r| r.strings).sum::<usize>();
         log::info!(
-            "emulated {} of {} candidate decoding routines in {:.1}s; the extra routines decoded {} strings",
+            "emulated {} of {} candidate decoding routines in {:.1}s{}; the extra routines decoded {} strings",
             routines.len(),
-            candidates.required.len() + candidates.extra.len(),
+            queue.len(),
             t0.elapsed().as_secs_f64(),
+            if helpers_used > 0 { format!(" with {} threads", helpers_used + 1) } else { String::new() },
             results.len() - required
         );
+        if routines.len() < queue.len() {
+            log::info!(
+                "stopped at the {:.1}s time budget; a longer --time-budget emulates more of the candidates",
+                budget.as_secs_f64()
+            );
+        }
     }
 
     (results, routines)

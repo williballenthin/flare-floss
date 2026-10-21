@@ -59,10 +59,10 @@ struct Args {
 
     /// after the top functions, keep emulating more candidates until decoding has taken
     /// this many seconds (0: just the top functions, for reproducible results)
-    #[arg(long, default_value_t = 2.0)]
+    #[arg(long, default_value_t = 5.0)]
     time_budget: f64,
 
-    /// threads for stack and tight string extraction (default: the number of CPUs)
+    /// threads for emulation, on larger files (default: the number of CPUs)
     #[arg(long)]
     threads: Option<usize>,
 
