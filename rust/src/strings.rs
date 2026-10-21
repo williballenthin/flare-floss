@@ -86,19 +86,17 @@ const FP_STRINGS: &[&str] = &[
     " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~",
 ];
 
-/// strings that the emulator itself creates (see the GetModuleFileName model).
+/// strings that the emulator itself creates:
+/// the module filename from the GetModuleFileName model (possibly within a longer message),
+/// and the fill byte for uninitialized memory, 0xFE, formatted as text.
 fn is_floss_artifact(s: &str) -> bool {
-    const MOD_NAME: &str = "C:\\Users\\flare\\program.exe";
-    let n = MOD_NAME.len();
-    [
-        MOD_NAME,
-        &MOD_NAME[1..],
-        &MOD_NAME[2..],
-        &MOD_NAME[..n - 1],
-        &MOD_NAME[1..n - 1],
-        &MOD_NAME[2..n - 1],
-    ]
-    .contains(&s)
+    const MOD_NAME: &str = "\\flare\\program.exe";
+    let lower = s.to_lowercase();
+    lower.contains(MOD_NAME)
+        || lower.contains("fefefefe")
+        // 0xFEFEFEFE as signed and unsigned decimal
+        || s.contains("16843010")
+        || s.contains("4278124286")
 }
 
 struct Filters {
