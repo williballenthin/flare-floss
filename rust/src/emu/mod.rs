@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{anyhow, Result};
 use icicle_vm::cpu::{
-    mem::{perm, perm::MemResult, IoMemory, Mapping},
+    mem::{perm, perm::MemResult, IoMemory, Mapping, MemoryMapping},
     ExceptionCode,
 };
 use icicle_vm::VmExit;
@@ -495,6 +495,12 @@ impl Emulator {
 
     // --- memory ---
 
+    /// is this address in the void? there, bulk reads and writes (like the API models' `memcpy`)
+    /// can skip icicle, which would call `Void` for every few bytes.
+    fn in_void(&self, va: VA) -> bool {
+        matches!(self.vm.cpu.mem.mapping.get(va), Some(MemoryMapping::Io(_)))
+    }
+
     /// read memory; bytes that aren't mapped read as `FILL_BYTE`.
     pub fn read_mem(&mut self, va: VA, len: usize) -> Vec<u8> {
         let mut buf = vec![FILL_BYTE; len];
@@ -502,6 +508,10 @@ impl Emulator {
         while offset < len {
             let addr = va.wrapping_add(offset as u64);
             let chunk = ((PAGE_SIZE - (addr % PAGE_SIZE)) as usize).min(len - offset);
+            if self.in_void(addr) {
+                offset += chunk;
+                continue;
+            }
             // a failed read leaves the fill bytes in place.
             let _ = self
                 .vm
@@ -519,6 +529,10 @@ impl Emulator {
         while offset < buf.len() {
             let addr = va.wrapping_add(offset as u64);
             let chunk = ((PAGE_SIZE - (addr % PAGE_SIZE)) as usize).min(buf.len() - offset);
+            if self.in_void(addr) {
+                offset += chunk;
+                continue;
+            }
             self.vm
                 .cpu
                 .mem
