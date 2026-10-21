@@ -1,0 +1,18 @@
+{'match': 186173, 'both fault': 62424, 'fault differs': 40, 'mismatch': 125}
+16 mnemonics with mismatches
+  div: 42  e.g. f7f1: unicorn fault, icicle ok
+  idiv: 26  e.g. f7fb: unicorn fault, icicle ok
+  push: 18  e.g. 0e: memory: unicorn [(67108, 0), (67109, 0), (67110, 0), (67111, 0)] icicle [[67108, 0], [67109, 0]]
+  xchg: 16  e.g. 8705206d0000: ax: unicorn 0x0 icicle 0xf52f282b00000000
+  stmxcsr: 14  e.g. 0fae1c24: memory: unicorn [(65872, 128), (65873, 31), (65874, 0), (65875, 0)] icicle [[65872, 0], [65873, 0], [65874, 0], [65875, 0]]
+  pcmpistri: 14  e.g. 660f3a63c815: unicorn ok, icicle UnimplementedOp
+  pop: 12  e.g. 1f: sp: unicorn 0x20010278 icicle 0x2001027c
+  cvttsd2si: 8  e.g. f20f2cc1: ax: unicorn 0x80000000 icicle 0x7fffffff
+  movsd: 2  e.g. f2440f11442430: memory: unicorn [(66480, 226), (66481, 125), (66482, 97), (66483, 21)] icicle [[66480, 0], [66481, 0], [66482, 0], [66483, 0]]
+  aam: 2  e.g. d49c: eflags: unicorn 0x80 icicle 0x0 (defined 0x4c4)
+  psraw: 2  e.g. 660f71e008: unicorn ok, icicle UnimplementedOp
+  aad: 2  e.g. d5f4: eflags: unicorn 0x84 icicle 0x4 (defined 0x4c4)
+  sysret: 2  e.g. 0f07: unicorn ok, icicle UnimplementedOp
+  cvttss2si: 2  e.g. f3480f2cc8: cx: unicorn 0x8000000000000000 icicle 0x7fffffffffffffff
+  movups: 2  e.g. 440f11442460: memory: unicorn [(66976, 122), (66977, 60), (66978, 98), (66979, 92)] icicle [[66976, 0], [66977, 0], [66978, 0], [66979, 0]]
+  test: 1  e.g. f60f85: eflags: unicorn 0x81 icicle 0x44 (defined 0xcc5)
