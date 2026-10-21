@@ -1,0 +1,258 @@
+//! Finding strings in bytes, and filtering out junk.
+//!
+//! This is a port of FLOSS's `strings.py` and the false-positive filters
+//! in `utils.py`, so that the strings found in emulated memory match FLOSS's.
+use std::sync::OnceLock;
+
+use regex::{bytes::Regex as BytesRegex, Regex};
+use serde::Serialize;
+
+pub const MIN_LENGTH: usize = 4;
+pub const MAX_STRING_LENGTH: usize = 2048;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum Encoding {
+    #[serde(rename = "ASCII")]
+    Ascii,
+    #[serde(rename = "UTF-16LE")]
+    Utf16Le,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundString {
+    pub string:   String,
+    /// offset into the buffer.
+    pub offset:   usize,
+    pub encoding: Encoding,
+}
+
+fn ascii_re() -> &'static BytesRegex {
+    static RE: OnceLock<BytesRegex> = OnceLock::new();
+    RE.get_or_init(|| BytesRegex::new(r"(?-u)[\x20-\x7E\t]{4,}").unwrap())
+}
+
+fn utf16_re() -> &'static BytesRegex {
+    static RE: OnceLock<BytesRegex> = OnceLock::new();
+    RE.get_or_init(|| BytesRegex::new(r"(?-u)(?:[\x20-\x7E\t]\x00){4,}").unwrap())
+}
+
+/// a buffer of nothing but one of these bytes has no strings.
+const REPEATS: [u8; 4] = [b'A', 0x00, 0xFE, 0xFF];
+
+/// Find ASCII and UTF-16LE strings of at least 4 characters, ASCII first.
+pub fn extract_ascii_utf16(buf: &[u8]) -> Vec<FoundString> {
+    if buf.is_empty() || (REPEATS.contains(&buf[0]) && buf.iter().all(|&b| b == buf[0])) {
+        return vec![];
+    }
+
+    let ascii = ascii_re().find_iter(buf).map(|m| FoundString {
+        string:   String::from_utf8_lossy(m.as_bytes()).to_string(),
+        offset:   m.start(),
+        encoding: Encoding::Ascii,
+    });
+
+    let utf16 = utf16_re().find_iter(buf).map(|m| FoundString {
+        string:   m.as_bytes().iter().step_by(2).map(|&b| b as char).collect(),
+        offset:   m.start(),
+        encoding: Encoding::Utf16Le,
+    });
+
+    ascii.chain(utf16).collect()
+}
+
+/// strings that show up a lot but aren't interesting,
+/// mostly from the Microsoft C runtime.
+const FP_STRINGS: &[&str] = &[
+    "R6002",
+    "R6016",
+    "R6030",
+    "Program: ",
+    "Runtime Error!",
+    "bad locale name",
+    "ios_base::badbit set",
+    "ios_base::eofbit set",
+    "ios_base::failbit set",
+    "- CRT not initialized",
+    "program name unknown>",
+    "<program name unknown>",
+    "- floating point not loaded",
+    "Program: <program name unknown>",
+    "- not enough space for thread data",
+    // all printable ASCII chars
+    " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~",
+];
+
+/// strings that the emulator itself creates (see the GetModuleFileName model).
+fn is_floss_artifact(s: &str) -> bool {
+    const MOD_NAME: &str = "C:\\Users\\flare\\program.exe";
+    let n = MOD_NAME.len();
+    [
+        MOD_NAME,
+        &MOD_NAME[1..],
+        &MOD_NAME[2..],
+        &MOD_NAME[..n - 1],
+        &MOD_NAME[1..n - 1],
+        &MOD_NAME[2..n - 1],
+    ]
+    .contains(&s)
+}
+
+struct Filters {
+    /// removed from every string, in order.
+    general: Vec<Regex>,
+    /// short strings that match this are kept as-is.
+    strict_include: Regex,
+    /// removed from short strings, in order.
+    strict: Vec<Regex>,
+}
+
+fn filters() -> &'static Filters {
+    static FILTERS: OnceLock<Filters> = OnceLock::new();
+    FILTERS.get_or_init(|| Filters {
+        general: [
+            // FP string starts: pVA, VA, 0VA, ..VA
+            r"^.{0,2}[0pP]?[\]\^\[_\\V]A",
+            // FP string ends
+            r"[0pP]?[VWU][A@]$|Tp$",
+            // (the repeated-character filters are in `strip_repeats`)
+            // AaaAaAAaAAAaaAA-LIBGCCW32-EH-2-SJLJ-GTHR-MINGW32
+            r"[aA]*-LIBGCCW32-.*-GTHR-MINGW32",
+            // aeriedjD#shasj
+            r"(aeriedjD#shasj)+",
+            // fatal error:
+            r".*fatal error: .*",
+            // lAll0Y
+            r"^lAll",
+        ]
+        .iter()
+        .map(|re| Regex::new(re).unwrap())
+        .collect(),
+        // e.g. [ESC], [Alt], %d.dll
+        strict_include: Regex::new(r"^(?:\[.*?\]$|%[sd])").unwrap(),
+        strict: [r"^O.*A$", r"[^A-Za-z0-9.]"]
+            .iter()
+            .map(|re| Regex::new(re).unwrap())
+            .collect(),
+    })
+}
+
+/// be stricter removing junk from short strings.
+const MAX_STRING_LENGTH_FILTER_STRICT: usize = 6;
+
+/// remove runs of the same printable character, four or more times (`([ -~])\1{3,}`),
+/// then runs of the same four characters, five or more times (`([^% ]{4})\1{4,}`).
+/// (Rust's regex crate doesn't do backreferences.)
+fn strip_repeats(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+
+    let mut once: Vec<char> = vec![];
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let run = chars[i..].iter().take_while(|&&d| d == c).count();
+        if (' '..='~').contains(&c) && run >= 4 {
+            i += run;
+        } else {
+            once.push(c);
+            i += 1;
+        }
+    }
+
+    let mut out = String::new();
+    let mut i = 0;
+    while i < once.len() {
+        if i + 4 <= once.len() && once[i..i + 4].iter().all(|&c| c != '%' && c != ' ') {
+            let unit = &once[i..i + 4];
+            let mut repeats = 1;
+            while i + 4 * (repeats + 1) <= once.len() && &once[i + 4 * repeats..i + 4 * (repeats + 1)] == unit {
+                repeats += 1;
+            }
+            if repeats >= 5 {
+                i += 4 * repeats;
+                continue;
+            }
+        }
+        out.push(once[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Remove junk that commonly surrounds real strings in memory,
+/// like fragments of instructions or pointers.
+/// This is FLOSS's `strip_string`.
+pub fn strip_string(s: &str) -> String {
+    let filters = filters();
+    let mut s = s.to_string();
+    for (i, re) in filters.general.iter().enumerate() {
+        s = re.replace_all(&s, "").to_string();
+        // the repeated-character filters come after the prefix and suffix filters.
+        if i == 1 {
+            s = strip_repeats(&s);
+        }
+    }
+
+    if s.len() <= MAX_STRING_LENGTH_FILTER_STRICT && !filters.strict_include.is_match(&s) {
+        for re in filters.strict.iter() {
+            s = re.replace_all(&s, "").to_string();
+        }
+    }
+    s
+}
+
+/// Find the interesting strings in a buffer from emulated memory,
+/// skipping strings in `exclude`. This is FLOSS's `extract_strings`.
+pub fn extract_strings(
+    buf: &[u8],
+    min_length: usize,
+    exclude: &std::collections::HashSet<String>,
+) -> Vec<FoundString> {
+    if buf.len() < min_length {
+        return vec![];
+    }
+
+    extract_ascii_utf16(buf)
+        .into_iter()
+        .filter(|s| s.string.len() <= MAX_STRING_LENGTH)
+        .filter(|s| !FP_STRINGS.contains(&s.string.as_str()))
+        .filter(|s| !is_floss_artifact(&s.string))
+        .filter_map(|s| {
+            let stripped = strip_string(&s.string);
+            if stripped.len() < min_length || exclude.contains(&stripped) {
+                None
+            } else {
+                Some(FoundString { string: stripped, ..s })
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // see also `tests/strings.rs`, which compares against Python FLOSS.
+
+    #[test]
+    fn test_extract() {
+        let buf = b"\x00\x00hello world\x00h\x00i\x00 \x00t\x00h\x00e\x00r\x00e\x00\x00\x00";
+        let found = extract_ascii_utf16(buf);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].string, "hello world");
+        assert_eq!(found[0].offset, 2);
+        // the trailing "d\0" of "world" looks like a UTF-16 character, too.
+        assert_eq!(found[1].string, "dhi there");
+        assert_eq!(found[1].encoding, Encoding::Utf16Le);
+    }
+
+    #[test]
+    fn test_strip() {
+        assert_eq!(strip_string("hello world"), "hello world");
+        assert_eq!(strip_string("pVAhello"), "hello");
+        assert_eq!(strip_string("helloAAAAAworld"), "helloworld");
+        assert_eq!(strip_string("ab/v7+/v7+/v7+/v7+/v7+cd"), "abcd");
+        assert_eq!(strip_string("%d.dll"), "%d.dll");
+        assert_eq!(strip_string("[ESC]"), "[ESC]");
+        assert_eq!(strip_string("a-b!c"), "abc");
+    }
+}

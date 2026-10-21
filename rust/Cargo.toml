@@ -1,0 +1,35 @@
+[package]
+name = "floss"
+version = "0.1.0"
+description = "FLARE Obfuscated String Solver, in Rust"
+license = "Apache-2.0"
+edition = "2021"
+
+[[bin]]
+name = "floss-rs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+smallvec = "1"
+
+# lancelot: PE loading, disassembly, control flow, FLIRT
+lancelot = { git = "https://github.com/williballenthin/lancelot", rev = "7dd6b4389f929e4b4cb5a1118ca8f50396ae0925" }
+# icicle: the emulator (MIT/Apache-2.0); instruction semantics from Ghidra's SLEIGH specs
+icicle-vm = { git = "https://github.com/icicle-emu/icicle-emu", rev = "638508b72f480f9be6fe2e267ef09de8f1541f9a" }
+pcode = { git = "https://github.com/icicle-emu/icicle-emu", rev = "638508b72f480f9be6fe2e267ef09de8f1541f9a" }
+
+[profile.release]
+debug = 1
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
