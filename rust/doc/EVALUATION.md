@@ -15,7 +15,7 @@ instructions sampled from real malware. The gaps are known and bounded.
     run without FLIRT signatures (`--signatures` with an empty directory),
     cache disabled, `--string-type stack tight decoded`.
   - floss-rs: this directory, release build, defaults (no FLIRT signatures,
-    2 second time budget for decoding routines) unless noted.
+    5 second time budget for decoding routines, threads for each CPU) unless noted.
   - Corpora:
       - the FLOSS test files (`mandiant/flare-floss-testfiles`): 43 Windows binaries
         and shellcode with expected strings, plus 5 other samples;
@@ -87,18 +87,21 @@ floss-rs on all 315 capa test files under 1.5MB:
   - every file completes; there are no crashes or hangs;
   - .NET assemblies (25) and one PE with a malformed exception directory
     (which lancelot rejects) get static strings only, with a warning, like FLOSS for .NET;
-  - mean 2.3s per file, max 15s (with the 2s decoding budget; 1.4s mean without it);
-  - 240M instructions emulated, 6.4M snapshots, 1.6M API calls;
-  - self-modifying code was handled (icicle's code cache flushed) 36 times.
+  - mean 1.9s per file, max 10.3s (with the 5s decoding budget and 4 threads; 1.2s mean without the budget);
+  - 517M instructions emulated, 11.7M snapshots, 3.7M API calls;
+  - self-modifying code was handled (icicle's code cache flushed) 89 times.
 
 On the largest files:
 
 | file | size | functions | time | peak memory |
 |---|---|---|---|---|
-| `4122acca…` | 3.0MB | 1,446 | 8.3s | 398MB |
-| `ed888dc2…` | 4.7MB | 63 | 1.0s | 61MB |
-| `0761142e…` | 9.1MB | 1,467 | 16.8s | 424MB |
-| `112f9f0e…` | 9.6MB | 12,819 | 88.7s | 1,026MB |
+| `4122acca…` | 3.0MB | 1,446 | 10.2s | 1,004MB |
+| `ed888dc2…` | 4.7MB | 63 | 0.5s | 60MB |
+| `0761142e…` | 9.1MB | 1,467 | 19.6s | 1,012MB |
+| `112f9f0e…` | 9.6MB | 12,819 | 37.6s | 1,664MB |
+
+Each thread has its own emulator, which holds the code it has lifted: about 200MB
+per thread for a program of 1,400 functions. `--threads` limits it.
 
 ### Real malware: compared with Python FLOSS
 
@@ -106,9 +109,9 @@ Python FLOSS and floss-rs on 40 native files picked at random from the capa corp
 
 | | novel strings | shared | only this one | total time | per file |
 |---|---|---|---|---|---|
-| Python FLOSS | 1,111 | | 179 (vs. budget 0), 168 (vs. defaults) | 9,102s (2.5 hours) | mean 228s, max 1,183s |
-| floss-rs, `--time-budget 0` (FLOSS's candidates) | 1,057 | 932 | 125 | 67s | 95x faster (median; 13-280x) |
-| floss-rs, defaults (2s budget) | 1,540 | 943 | 597 | 109s | 54x faster (median; 7-178x) |
+| Python FLOSS | 1,111 | | 180 (vs. budget 0), 163 (vs. defaults) | 9,102s (2.5 hours) | mean 228s, max 1,183s |
+| floss-rs, `--time-budget 0` (FLOSS's candidates) | 1,053 | 931 | 122 | 54s | 109x faster (median; 31-371x) |
+| floss-rs, defaults (5s budget, 4 threads) | 2,019 | 948 | 1,071 | 96s | 69x faster (median; 26-181x) |
 
 The comparison counts only *novel* strings: strings that don't appear verbatim
 (ASCII or UTF-16LE) in the file. A plain `strings` finds the rest, so they say
@@ -117,17 +120,16 @@ nothing about deobfuscation. (Python FLOSS reports many static strings as
 match names by substring, and so "decodes" every format string passed to an
 `snprintf` wrapper.)
 
-The 168 novel strings that only Python FLOSS reports (against the defaults) are:
+The 163 novel strings that only Python FLOSS reports (against the defaults) are:
 
-  - 83 pieces of strings that floss-rs reports whole: FLOSS extracts strings from
+  - 85 pieces of strings that floss-rs reports whole: FLOSS extracts strings from
     changed bytes, so a decoded `cmd.exe /c net stop MSSQL$SYSTEM_BGC /y` also
     comes out as `e /c net stop MSSQL$SYSTEM_BGC /y` and `cmd.exe /c net sto`;
   - 23 emulator artifacts: `ineIntel` and `ntelineI` (vivisect's emulated `CPUID`),
     the fill byte as text (`fefefefe`), pieces of the emulated module path;
-  - 15 static strings with junk in front (`KA\nss3.dll`, `@\Google\Chrome\User Data\Default\Login Data`);
-  - 47 others, all junk on inspection: short random runs (`_o1VAo1`, `TUTUTUTU`),
-    numbers formatted from uninitialized values (`Unknown error (1096175631)`),
-    and fragments like `wRtlGe` and `omputerNameW`.
+  - 14 static strings with junk in front (`KA\nss3.dll`, `@\Google\Chrome\User Data\Default\Login Data`);
+  - 41 others, all junk on inspection: short random runs (`_o1VAo1`, `TUTUTUTU`),
+    and numbers formatted from uninitialized values (`Unknown error (1096175631)`).
 
 With `--time-budget 0`, the only plausibly real string of these is a fragment
 of an API name, `teToolhelp32Snapshot`; with the default budget, floss-rs finds
@@ -140,18 +142,93 @@ include noise, like intermediate states of decoders (`w1X1_1\1V1C1`) and
 crypto tables built at run time. Most of the extra strings, and most of the
 noise, come from emulating more candidates.
 
-### Emulating more candidates
+## How long to emulate decoding routines
 
 FLOSS emulates the 20 highest-scoring candidate decoding routines (plus tight
-functions); with Python's speed, that's a necessary limit. On the 308 native
-capa files, emulating more candidates for up to 2 seconds per file finds 60%
-more novel strings (4,171 → 6,694) for 68% more total time (429s → 721s).
-Among them, more ransom note text (strings containing `.onion`: 15 vs 7) and
-more shadow copy deletion commands (`vssadmin delete shadows`: 5 vs 3;
-`wmic shadowcopy delete`: 3 vs 2).
-So floss-rs emulates at least the top 20, then keeps going, highest score first,
-until decoding has taken 2 seconds (`--time-budget`), and tells the user.
-`--time-budget 0` reproduces FLOSS's fixed set.
+functions). That's a limit set by Python's speed, and the question is what
+limit floss-rs should use instead, without asking the user to choose.
+
+**Method.** Every candidate of every native capa file was emulated (60s cap,
+which every file finished within), recording each routine's time and strings
+(`analysis.decoding_routines` in the JSON output). Routines are emulated
+independently, so any stopping rule can be replayed offline from this one run:
+its value is the union of the strings from the routines it would run, its cost
+the sum of their times. Strings are scored two ways: *novel* (not in the file
+as-is, and not mostly static text, which drops format strings filled in with
+garbage), and *meaningful* (novel, at least 6 characters, mostly letters, not
+repetitive). The measure is the share of each file's strings found, averaged
+over files, so no one file dominates. Rules were tuned on half of the files and
+checked on the other half (`scripts/budget/`).
+
+**Along the way, two fixes.** Most of the time went to a few routines: the
+slowest 1% took 59% of the decoding time, at up to 36s for one routine, and
+almost never found anything. One cause was diffing memory: with a view before
+every unmodeled API call, a routine that had written megabytes compared them
+all at each of thousands of calls. The other was the API models' `memcpy` and
+`memset` with garbage sizes, copying megabytes of fill bytes into the void, 16
+bytes at a time. With both fixed (same strings), emulating every candidate of
+every file takes 622s of decoding, where before it took 1,154s and four files
+still hadn't finished at 60s each; the slowest routine takes 5s.
+
+**The curve.** Share of each file's strings found, by decoding budget:
+
+| budget | 1 thread: meaningful | novel | mean time per file | 4 threads: meaningful | novel | mean time |
+|---|---|---|---|---|---|---|
+| 0 (FLOSS's 20) | 41% | 40% | 1.4s | 41% | 40% | 1.4s |
+| 0.5s | 67% | 68% | 1.6s | 67% | 68% | 1.7s |
+| 1s | 78% | 80% | 1.8s | 88% | 89% | 1.8s |
+| 2s | 87% | 88% | 2.1s | 95% | 96% | 2.0s |
+| 5s | 94% | 95% | 2.6s | 99% | 99% | 2.1s |
+| 10s | 99% | 99% | 3.0s | 100% | 99.5% | 2.1s |
+| 20s | 99.9% | 99.4% | 3.3s | 100% | 100% | 2.1s |
+
+(4 threads simulated from the 1-thread costs; real runs below.) The median
+file takes 1.35s at any budget: the budget only matters for larger files.
+With 1 thread and a 5s budget, files of under 1,000 candidates get 98.5-100%,
+and files of more than 1,000 get 80%; these need 10-20s.
+
+**Where the strings come from.** Not mostly the top 20: they give 14% of the
+meaningful strings, ranks 21-50 give 40%, and ranks beyond 200 still give 22%.
+On FLOSS's score, candidates are ranked only a little better than random (at
+a 2s budget: 87% vs 79%), but an ideal order would find every string in 0.5s
+per file: the routines that decode strings are few and cheap, and hard to spot.
+
+**Signals that might tell when to stop, or what to emulate first:**
+
+| signal | finding |
+|---|---|
+| dry spells: no new string for a while | after 1s without a new string, 23% of files still find more; after 2s, 31%. A dry spell doesn't mean a file is done, so "stop when nothing new turns up" lands on the same curve as a fixed budget (2s dry: 97% at 2.9s mean, vs a 7.5s budget: 96% at 2.8s) |
+| score cliffs: the biggest drop in scores | below it, 0.10 strings per 100 routines, vs 0.83 above. Real, but the budget rarely gets there anyway |
+| relative or absolute score floors | worse than budgets at every cost |
+| did the top 20 find strings? | if so, 56% of files find more later; if not, 19%, but those files hold 44% of the later strings. "2s, or 20s if the top found strings" gets 99.0% at 3.2s mean, vs a 10s budget's 98.7% at 3.0s |
+| budgets that scale with the file (per candidate, or proportional to the rest of the analysis) | on the same curve |
+| a learned ranking from the candidates' features (logistic regression, gradient boosting) | predicts poorly (AUC 0.72-0.75; the FLOSS score alone: 0.46 across files), and orders candidates no better than the score at small budgets |
+
+None of the signals beats spending the time, so the budget stays a plain time
+limit, and the improvement is in how much work fits in it: candidates are
+independent, so floss-rs emulates them on several threads.
+
+**Real runs** on the capa corpus, scored against emulating every candidate:
+
+| | meaningful | novel | mean | p95 | max |
+|---|---|---|---|---|---|
+| `--time-budget 0` (FLOSS's candidates) | 41% | 40% | 1.2s | 3.5s | 10.1s |
+| 1 thread, 2s budget (the old default) | 87.1% | 88.6% | 2.0s | 5.8s | 9.3s |
+| 4 threads, 2s budget | 91.6% | 92.5% | 1.9s | 5.3s | 10.9s |
+| **4 threads, 5s budget (the default)** | **99.5%** | **99.0%** | 2.0s | 7.5s | 10.3s |
+
+So the default is a 5s budget, on as many threads as there are CPUs (helpers
+start only once decoding has taken 0.3s, so small files don't pay for them).
+With the same candidates, the results don't depend on the number of threads;
+`--time-budget 0` reproduces FLOSS's fixed set. When the budget stops
+decoding early, floss-rs says so, and how to emulate more.
+
+Across the corpus, the default finds 2.4 times the novel strings of FLOSS's
+fixed set (4,164 → 9,920), and twice the meaningful ones (2,537 → 5,114):
+for example ransom note text, a Monero wallet registry key, a Bitcoin
+`wallet.dat` path, the `root\SecurityCenter2` WMI namespace, and DNS-over-HTTPS
+queries. 45% of the added strings are meaningful; the rest are noise like
+format strings filled in with garbage (`Runtime error 254 at 00452E57`).
 
 ## icicle
 
@@ -256,5 +333,9 @@ icicle's design (SLEIGH semantics, Rust, copy-on-write snapshots) fits FLOSS wel
     vivisect does more analysis.
   - **Return address repair**: FLOSS's `ApiMonitor` recovers when a decoder
     returns to an unexpected address; floss-rs doesn't.
-  - **Parallelism**: stack and tight strings run on several threads (one emulator
-    each) for large files; decoded strings don't yet.
+  - **Noise in decoded strings**: emulating more candidates finds more format
+    strings filled in with garbage, and partial decoder states. Strings that are
+    mostly static text from the file could be filtered or ranked lower (the
+    evaluation scripts already detect them).
+  - **A keep-going mode**: emulate candidates until the user presses enter, for
+    the largest files, where 5s on 4 threads covers only 4-15% of the candidates.

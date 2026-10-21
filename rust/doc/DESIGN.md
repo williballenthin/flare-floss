@@ -192,7 +192,9 @@ wrote: on the stack these are tight strings; elsewhere they're decoded strings.
   1. **Pick candidates** (`features.rs`): score each function by features like
      tight loops, non-zeroing `xor`s, shifts, and how often it's called;
      take the top 20, plus all small functions with tight loops. This is
-     FLOSS's `identify.py`, feature for feature.
+     FLOSS's `identify.py`, feature for feature. Then, while decoding has taken
+     less than the time budget (5s), keep going down the ranking: the strings are
+     spread far down it, and the score predicts them poorly (EVALUATION.md).
   2. **Find call contexts**: `explore` each function that calls the candidate,
      and snapshot the state at each call to it. If nothing calls the candidate
      (an entry point, export, or callback), emulate it from its entry instead.
@@ -221,6 +223,12 @@ leftovers.
 And a string that grows from one view to the next, like one decoded a
 character at a time with an API call after each, is reported once, as it is
 at the end, rather than as each of its prefixes.
+
+Candidates are independent, so they're emulated on several threads, each with
+its own emulator, taking candidates in order from a shared queue. Helper threads
+start only once decoding has taken longer than they take to set up. The results
+are put back in candidate order, so the output doesn't depend on the number of
+threads (for the same candidates).
 
 ## Choices, and what they cost
 

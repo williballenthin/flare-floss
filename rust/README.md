@@ -22,13 +22,15 @@ cargo build --release
 Useful options:
 
   - `--only static stack tight decoded` / `--no ...`: choose string types.
-  - `--time-budget SECONDS` (default 2): after the top 20 candidate decoding
+  - `--time-budget SECONDS` (default 5): after the top 20 candidate decoding
     routines, keep emulating more candidates until decoding has taken this long.
-    `0` emulates exactly FLOSS's set, for reproducible output.
+    `0` emulates exactly FLOSS's set, for reproducible output. See
+    [EVALUATION.md](doc/EVALUATION.md#how-long-to-emulate-decoding-routines) for how the default was chosen.
   - `--top-functions N` (default 20): the minimum number of candidates to emulate.
   - `--signatures PATH`: FLIRT signatures (`.sig`/`.pat`, or a directory of them)
     to recognize library functions. Off by default: loading FLOSS's signatures takes ~5s.
-  - `--threads N`: threads for stack and tight strings, on large files.
+  - `--threads N` (default: the number of CPUs): threads for emulation, on larger files.
+    Each takes memory for the code it lifts (about 200MB for a program of 1,400 functions).
   - `RUST_LOG=floss=debug`: see what the emulator is doing.
 
 Supported: PE files and shellcode, x86 and x64; static, stack, tight, and decoded strings.
@@ -59,7 +61,7 @@ sleigh/x86/          Ghidra's x86 SLEIGH specifications
 tests/               unit tests against Python FLOSS's string functions,
                      and end-to-end tests on programs in tests/programs
 examples/            inspect (what lancelot sees), bench, difftest (vs Unicorn)
-scripts/             difftest_unicorn.py
+scripts/             difftest_unicorn.py; budget/: how the time budget was chosen
 ```
 
 ## Tests
