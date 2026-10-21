@@ -52,6 +52,8 @@ pub struct Options {
     pub time_budget:     std::time::Duration,
     /// only analyze these functions.
     pub functions:       Option<Vec<u64>>,
+    /// threads for stack and tight string extraction.
+    pub threads:         usize,
 }
 
 impl Default for Options {
@@ -67,8 +69,57 @@ impl Default for Options {
             top_functions:   20,
             time_budget:     std::time::Duration::from_secs(2),
             functions:       None,
+            threads:         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
         }
     }
+}
+
+/// files with fewer functions than this don't use extra threads,
+/// since each thread's emulator takes ~0.3s to set up.
+const MIN_FUNCTIONS_PER_THREAD: usize = 500;
+
+/// Apply `f` to chunks of `items`, in parallel, each thread with its own emulator
+/// (icicle's VM can't be shared between threads). Results are in the order of `items`.
+fn in_parallel<T: Sync, R: Send>(
+    ws: &workspace::Workspace,
+    emu: &mut emu::Emulator,
+    items: &[T],
+    threads: usize,
+    f: impl Fn(&mut emu::Emulator, &[T]) -> R + Sync,
+) -> Result<Vec<R>> {
+    let threads = threads.min(items.len() / MIN_FUNCTIONS_PER_THREAD).max(1);
+    if threads == 1 {
+        return Ok(vec![f(emu, items)]);
+    }
+
+    // more chunks than threads, handed out as threads finish, since functions vary in cost.
+    let chunks: Vec<&[T]> = items.chunks(items.len().div_ceil(threads * 8)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: Vec<std::sync::Mutex<Option<R>>> = chunks.iter().map(|_| Default::default()).collect();
+    log::debug!("using {threads} threads for {} items", items.len());
+
+    let stats: Vec<emu::Stats> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| -> Result<emu::Stats> {
+                    let mut emu = emu::Emulator::new(ws)?;
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(chunk) = chunks.get(i) else {
+                            return Ok(emu.stats);
+                        };
+                        *results[i].lock().unwrap() = Some(f(&mut emu, chunk));
+                    }
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().expect("worker panicked")).collect::<Result<_>>()
+    })?;
+    for s in stats {
+        emu.stats.merge(&s);
+    }
+
+    Ok(results.into_iter().map(|r| r.into_inner().unwrap().expect("every chunk ran")).collect())
 }
 
 fn seconds(t: Instant) -> f64 {
@@ -140,10 +191,12 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
             .map(|f| f.va)
             .collect();
         doc.analysis.functions_analyzed_stack_strings = functions.len();
-        let (stack_strings, global_strings) =
-            stackstrings::extract_stackstrings(&ws, &mut emu, &functions, opts.min_length);
-        doc.strings.stack_strings = stack_strings;
-        decoded_elsewhere.extend(global_strings);
+        for (stack_strings, global_strings) in in_parallel(&ws, &mut emu, &functions, opts.threads, |emu, chunk| {
+            stackstrings::extract_stackstrings(&ws, emu, chunk, opts.min_length)
+        })? {
+            doc.strings.stack_strings.extend(stack_strings);
+            decoded_elsewhere.extend(global_strings);
+        }
         doc.metadata.runtime.stack_strings = seconds(t);
     }
 
@@ -155,10 +208,12 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
             .map(|f| (f.va, f.tight_loops()))
             .collect();
         doc.analysis.functions_analyzed_tight_strings = functions.len();
-        let (tight_strings, decoded_strings) =
-            tightstrings::extract_tightstrings(&ws, &mut emu, &functions, opts.min_length);
-        doc.strings.tight_strings = tight_strings;
-        decoded_elsewhere.extend(decoded_strings);
+        for (tight_strings, decoded_strings) in in_parallel(&ws, &mut emu, &functions, opts.threads, |emu, chunk| {
+            tightstrings::extract_tightstrings(&ws, emu, chunk, opts.min_length)
+        })? {
+            doc.strings.tight_strings.extend(tight_strings);
+            decoded_elsewhere.extend(decoded_strings);
+        }
         doc.metadata.runtime.tight_strings = seconds(t);
     }
 

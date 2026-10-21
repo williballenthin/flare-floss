@@ -62,6 +62,10 @@ struct Args {
     #[arg(long, default_value_t = 2.0)]
     time_budget: f64,
 
+    /// threads for stack and tight string extraction (default: the number of CPUs)
+    #[arg(long)]
+    threads: Option<usize>,
+
     /// emit JSON
     #[arg(short = 'j', long)]
     json: bool,
@@ -109,6 +113,7 @@ fn main() -> Result<()> {
         decoded_strings: enabled(StringType::Decoded),
         signatures: expand_signatures(&args.signatures)?,
         top_functions: args.top_functions,
+        threads: args.threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)),
         time_budget: std::time::Duration::from_secs_f64(args.time_budget.max(0.0)),
         functions: if args.functions.is_empty() {
             None

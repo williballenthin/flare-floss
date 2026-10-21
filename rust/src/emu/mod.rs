@@ -327,6 +327,20 @@ pub struct Stats {
     pub unsupported:   BTreeMap<String, u64>,
 }
 
+impl Stats {
+    pub fn merge(&mut self, other: &Stats) {
+        self.instructions += other.instructions;
+        self.api_calls += other.api_calls;
+        self.snapshots += other.snapshots;
+        self.code_flushes += other.code_flushes;
+        self.snapshot_us += other.snapshot_us;
+        self.restore_us += other.restore_us;
+        for (k, v) in other.unsupported.iter() {
+            *self.unsupported.entry(k.clone()).or_default() += v;
+        }
+    }
+}
+
 pub struct Emulator {
     pub stats:       Stats,
     vm:              icicle_vm::Vm,
