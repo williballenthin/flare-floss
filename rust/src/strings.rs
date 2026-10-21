@@ -101,6 +101,7 @@ fn is_floss_artifact(s: &str) -> bool {
                 .match_indices(lower.as_str())
                 .any(|(i, m)| i < distinctive.end && distinctive.start < i + m.len()))
         || lower.contains("fefefefe")
+        || lower.contains("fe fe fe fe")
         // 0xFEFEFEFE as signed and unsigned decimal
         || s.contains("16843010")
         || s.contains("4278124286")

@@ -45,8 +45,11 @@ pub struct Options {
     pub decoded_strings: bool,
     /// FLIRT signature files, to recognize library functions.
     pub signatures:      Vec<PathBuf>,
-    /// how many of the top-scoring candidate decoding routines to emulate.
+    /// how many of the top-scoring candidate decoding routines to emulate, at least.
     pub top_functions:   usize,
+    /// after those, keep emulating more candidates until decoding has taken this long.
+    /// with zero, emulate exactly `top_functions` (plus tight functions), like FLOSS.
+    pub time_budget:     std::time::Duration,
     /// only analyze these functions.
     pub functions:       Option<Vec<u64>>,
 }
@@ -62,6 +65,7 @@ impl Default for Options {
             decoded_strings: true,
             signatures:      vec![],
             top_functions:   20,
+            time_budget:     std::time::Duration::from_secs(2),
             functions:       None,
         }
     }
@@ -160,10 +164,18 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
 
     if opts.decoded_strings {
         let t = Instant::now();
-        let routines = features::select_decoding_functions(&features, opts.top_functions);
-        doc.analysis.functions_analyzed_decoded_strings = routines.len();
-        doc.analysis.decoding_function_scores = routines.iter().map(|va| (*va, features[va].score)).collect();
-        doc.strings.decoded_strings = decoded::decode_strings(&ws, &mut emu, &routines, opts.min_length);
+        let candidates = features::rank_decoding_functions(&features, opts.top_functions);
+        let (decoded_strings, emulated) =
+            decoded::decode_strings(&ws, &mut emu, &candidates, opts.time_budget, opts.min_length);
+        doc.strings.decoded_strings = decoded_strings;
+        doc.analysis.functions_analyzed_decoded_strings = emulated;
+        doc.analysis.decoding_function_scores = candidates
+            .required
+            .iter()
+            .chain(candidates.extra.iter())
+            .take(emulated)
+            .map(|va| (*va, features[va].score))
+            .collect();
         doc.metadata.runtime.decoded_strings = seconds(t);
     }
 

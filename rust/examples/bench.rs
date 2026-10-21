@@ -1,34 +1,39 @@
-//! micro-benchmarks of emulator primitives on a real program.
+//! measure the costs of emulation primitives on a real program:
+//! exploring every function twice, so the second time the code is already lifted.
 //! usage: bench <pe>
+use floss::{driver, emu};
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let buf = std::fs::read(&args[1])?;
+    let t = std::time::Instant::now();
     let ws = floss::workspace::Workspace::from_pe(&buf, &[])?;
-    let mut emu = floss::emu::Emulator::new(&ws)?;
-    let fva = ws.functions().next().unwrap().va;
-    emu.reset(fva);
-
-    let n: u32 = std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+    println!("workspace: {:?}", t.elapsed());
     let t = std::time::Instant::now();
-    let snaps: Vec<_> = (0..n).map(|_| emu.snapshot()).collect();
-    println!("snapshot: {:?} each", t.elapsed() / n);
+    let mut emu = emu::Emulator::new(&ws)?;
+    println!("emulator (SLEIGH compile + mapping): {:?}", t.elapsed());
 
-    let t = std::time::Instant::now();
-    for s in snaps.iter() {
-        emu.restore(s);
+    let opts = emu::ExecOptions {
+        calls:      emu::CallPolicy::StepOver,
+        api_models: false,
+        rep_max:    256,
+    };
+    let functions: Vec<u64> = ws.functions().map(|f| f.va).collect();
+    for round in ["cold (lifting)", "warm (cached)"] {
+        let before = emu.stats.clone();
+        let t = std::time::Instant::now();
+        for &f in functions.iter() {
+            emu.reset(f);
+            driver::explore(&mut emu, &opts, &mut driver::Nothing);
+        }
+        let el = t.elapsed();
+        let insns = emu.stats.instructions - before.instructions;
+        let snaps = emu.stats.snapshots - before.snapshots;
+        println!(
+            "{round}: {} functions, {insns} instructions, {snaps} snapshots, {el:?}: {:.2}µs/instruction",
+            functions.len(),
+            el.as_secs_f64() * 1e6 / insns as f64
+        );
     }
-    println!("restore: {:?} each", t.elapsed() / n);
-
-    let t = std::time::Instant::now();
-    for _ in 0..n {
-        emu.reset(fva);
-    }
-    println!("reset: {:?} each", t.elapsed() / n);
-
-    let t = std::time::Instant::now();
-    for _ in 0..1000 {
-        let _ = emu.memory();
-    }
-    println!("memory view: {:?} each", t.elapsed() / 1000);
     Ok(())
 }

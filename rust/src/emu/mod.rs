@@ -33,6 +33,7 @@ pub mod api;
 pub mod insn;
 pub mod sleigh;
 pub mod snapshot;
+mod x86;
 
 pub use insn::{Flow, Insn};
 pub use snapshot::{MemoryView, Snapshot};
@@ -380,6 +381,8 @@ impl Emulator {
             value: FILL_BYTE,
         });
         map_void(&mut vm, &layout, arch);
+
+        x86::install(&mut vm);
 
         // the SSE control register's power-on value: round to nearest, exceptions masked.
         if let Some(mxcsr) = vm.cpu.arch.sleigh.get_varnode("MXCSR") {

@@ -9,13 +9,17 @@
 //!   3. look for strings in the memory that changed.
 //!
 //! This is FLOSS's `string_decoder.py`, `function_argument_getter.py`, and `decoding_manager.py`.
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    time::{Duration, Instant},
+};
 
 use lancelot::VA;
 
 use crate::{
     driver::{self, Control, Limits, Observer},
     emu::{CallPolicy, Emulator, ExecOptions, Flow, Insn, MemoryView, Snapshot},
+    features::Candidates,
     results::{AddressType, DecodedString},
     strings,
     workspace::Workspace,
@@ -155,40 +159,82 @@ fn should_shortcut(n: usize, n_calls: usize, found_strings: usize) -> bool {
     n >= threshold && found_strings <= FUNCTION_MIN_DECODED_STRINGS
 }
 
-pub fn decode_strings(ws: &Workspace, emu: &mut Emulator, routines: &[VA], min_length: usize) -> Vec<DecodedString> {
+/// Emulate the candidate decoding routines and collect the strings they decode:
+/// all the required candidates, then extra candidates until `budget` is spent.
+/// Returns the strings, and how many routines were emulated.
+pub fn decode_strings(
+    ws: &Workspace,
+    emu: &mut Emulator,
+    candidates: &Candidates,
+    budget: Duration,
+    min_length: usize,
+) -> (Vec<DecodedString>, usize) {
+    let t0 = Instant::now();
     let mut results = vec![];
-    for &routine in routines {
-        let mut seen: HashSet<String> = ws.referenced_strings(routine);
-        let contexts = extract_call_contexts(ws, emu, routine);
-        let n_calls = contexts.len();
-        log::debug!("decoded: routine {routine:#x}: {n_calls} calls");
+    for &routine in candidates.required.iter() {
+        results.extend(decode_routine(ws, emu, routine, min_length));
+    }
+    let mut emulated = candidates.required.len();
 
-        for (n, ctx) in contexts.iter().enumerate() {
-            if should_shortcut(n + 1, n_calls, seen.len()) {
-                log::debug!("decoded: shortcutting routine {routine:#x} after {n} calls");
+    let elapsed = t0.elapsed();
+    if elapsed < budget && !candidates.extra.is_empty() {
+        log::info!(
+            "emulated the top {emulated} candidate decoding routines in {:.1}s; \
+             emulating more candidates, up to the {:.1}s time budget, for more thorough results",
+            elapsed.as_secs_f64(),
+            budget.as_secs_f64()
+        );
+        let required = results.len();
+        for &routine in candidates.extra.iter() {
+            if t0.elapsed() >= budget {
                 break;
             }
+            results.extend(decode_routine(ws, emu, routine, min_length));
+            emulated += 1;
+        }
+        log::info!(
+            "emulated {emulated} of {} candidate decoding routines in {:.1}s; the extra routines decoded {} strings",
+            candidates.required.len() + candidates.extra.len(),
+            t0.elapsed().as_secs_f64(),
+            results.len() - required
+        );
+    }
 
-            let (before, afters) = emulate_decoding_routine(emu, ctx);
-            for (i, after) in afters.iter().enumerate() {
-                // only look at memory that changed since the previous view,
-                // since strings elsewhere were already found.
-                let previous = if i > 0 { Some(&afters[i - 1]) } else { None };
-                for change in after.changes_since(&before, previous) {
-                    let address_type = AddressType::from(change.region);
-                    for (va, s) in strings::strings_touching(after, &change, min_length, &seen) {
-                        if !seen.insert(s.string.clone()) {
-                            continue;
-                        }
-                        results.push(DecodedString {
-                            address: va,
-                            address_type,
-                            string: s.string,
-                            encoding: s.encoding,
-                            decoded_at: ctx.decoded_at,
-                            decoding_routine: routine,
-                        });
+    (results, emulated)
+}
+
+/// Emulate one candidate decoding routine from each of its call contexts.
+fn decode_routine(ws: &Workspace, emu: &mut Emulator, routine: VA, min_length: usize) -> Vec<DecodedString> {
+    let mut results = vec![];
+    let mut seen: HashSet<String> = ws.referenced_strings(routine);
+    let contexts = extract_call_contexts(ws, emu, routine);
+    let n_calls = contexts.len();
+    log::debug!("decoded: routine {routine:#x}: {n_calls} calls");
+    for (n, ctx) in contexts.iter().enumerate() {
+        if should_shortcut(n + 1, n_calls, seen.len()) {
+            log::debug!("decoded: shortcutting routine {routine:#x} after {n} calls");
+            break;
+        }
+
+        let (before, afters) = emulate_decoding_routine(emu, ctx);
+        for (i, after) in afters.iter().enumerate() {
+            // only look at memory that changed since the previous view,
+            // since strings elsewhere were already found.
+            let previous = if i > 0 { Some(&afters[i - 1]) } else { None };
+            for change in after.changes_since(&before, previous) {
+                let address_type = AddressType::from(change.region);
+                for (va, s) in strings::strings_touching(after, &change, min_length, &seen) {
+                    if !seen.insert(s.string.clone()) {
+                        continue;
                     }
+                    results.push(DecodedString {
+                        address: va,
+                        address_type,
+                        string: s.string,
+                        encoding: s.encoding,
+                        decoded_at: ctx.decoded_at,
+                        decoding_routine: routine,
+                    });
                 }
             }
         }

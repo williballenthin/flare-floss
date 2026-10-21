@@ -53,9 +53,14 @@ struct Args {
     #[arg(long, value_parser = parse_hex, num_args = 1..)]
     functions: Vec<u64>,
 
-    /// how many of the top-scoring candidate decoding routines to emulate
+    /// how many of the top-scoring candidate decoding routines to emulate, at least
     #[arg(long, default_value_t = 20)]
     top_functions: usize,
+
+    /// after the top functions, keep emulating more candidates until decoding has taken
+    /// this many seconds (0: just the top functions, for reproducible results)
+    #[arg(long, default_value_t = 2.0)]
+    time_budget: f64,
 
     /// emit JSON
     #[arg(short = 'j', long)]
@@ -84,7 +89,7 @@ fn expand_signatures(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,lancelot=error")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,floss=info,lancelot=error")).init();
     let args = Args::parse();
 
     let ext = args.sample.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
@@ -104,6 +109,7 @@ fn main() -> Result<()> {
         decoded_strings: enabled(StringType::Decoded),
         signatures: expand_signatures(&args.signatures)?,
         top_functions: args.top_functions,
+        time_budget: std::time::Duration::from_secs_f64(args.time_budget.max(0.0)),
         functions: if args.functions.is_empty() {
             None
         } else {

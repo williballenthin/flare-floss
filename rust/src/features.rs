@@ -486,18 +486,25 @@ fn writes_memory(ws: &Workspace, bb: &BasicBlock) -> bool {
     })
 }
 
-/// the functions to emulate as decoding routines:
-/// the `count` highest scoring, plus all tight functions.
-pub fn select_decoding_functions(features: &BTreeMap<VA, FunctionFeatures>, count: usize) -> Vec<VA> {
+/// The candidate decoding routines, in the order to emulate them:
+///   - `required`: the `count` highest scoring, plus all tight functions (like FLOSS);
+///   - `extra`: the rest, highest scoring first, to emulate while there's time.
+pub struct Candidates {
+    pub required: Vec<VA>,
+    pub extra:    Vec<VA>,
+}
+
+pub fn rank_decoding_functions(features: &BTreeMap<VA, FunctionFeatures>, count: usize) -> Candidates {
     let mut ranked: Vec<&FunctionFeatures> = features.values().collect();
     // stable sort: ties keep address order, like FLOSS.
     ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mut selected: Vec<VA> = ranked.iter().take(count).map(|f| f.va).collect();
+    let mut required: Vec<VA> = ranked.iter().take(count).map(|f| f.va).collect();
     for f in features.values() {
-        if f.is_tight_function() && !selected.contains(&f.va) {
-            selected.push(f.va);
+        if f.is_tight_function() && !required.contains(&f.va) {
+            required.push(f.va);
         }
     }
-    selected
+    let extra = ranked.iter().map(|f| f.va).filter(|va| !required.contains(va)).collect();
+    Candidates { required, extra }
 }
