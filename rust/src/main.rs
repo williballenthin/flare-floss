@@ -53,6 +53,10 @@ struct Args {
     #[arg(long, value_parser = parse_hex, num_args = 1..)]
     functions: Vec<u64>,
 
+    /// how many of the top-scoring candidate decoding routines to emulate
+    #[arg(long, default_value_t = 20)]
+    top_functions: usize,
+
     /// emit JSON
     #[arg(short = 'j', long)]
     json: bool,
@@ -99,6 +103,7 @@ fn main() -> Result<()> {
         tight_strings: enabled(StringType::Tight),
         decoded_strings: enabled(StringType::Decoded),
         signatures: expand_signatures(&args.signatures)?,
+        top_functions: args.top_functions,
         functions: if args.functions.is_empty() {
             None
         } else {

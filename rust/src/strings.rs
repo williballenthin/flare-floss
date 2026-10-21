@@ -90,9 +90,16 @@ const FP_STRINGS: &[&str] = &[
 /// the module filename from the GetModuleFileName model (possibly within a longer message),
 /// and the fill byte for uninitialized memory, 0xFE, formatted as text.
 fn is_floss_artifact(s: &str) -> bool {
-    const MOD_NAME: &str = "\\flare\\program.exe";
+    const MOD_NAME: &str = "c:\\users\\flare\\program.exe";
     let lower = s.to_lowercase();
-    lower.contains(MOD_NAME)
+    // the part of the module filename that a real string wouldn't contain.
+    let distinctive = MOD_NAME.find("flare").unwrap()..MOD_NAME.find(".exe").unwrap();
+    lower.contains("\\flare\\program.exe")
+        // a piece of the module filename, like "rogram.exe", but not "C:\\Users".
+        || (lower.len() >= 4
+            && MOD_NAME
+                .match_indices(lower.as_str())
+                .any(|(i, m)| i < distinctive.end && distinctive.start < i + m.len()))
         || lower.contains("fefefefe")
         // 0xFEFEFEFE as signed and unsigned decimal
         || s.contains("16843010")
@@ -245,6 +252,16 @@ mod tests {
         // the trailing "d\0" of "world" looks like a UTF-16 character, too.
         assert_eq!(found[1].string, "dhi there");
         assert_eq!(found[1].encoding, Encoding::Utf16Le);
+    }
+
+    #[test]
+    fn test_artifacts() {
+        assert!(is_floss_artifact("Program: C:\\Users\\flare\\program.exe"));
+        assert!(is_floss_artifact("rogram.exe"));
+        assert!(is_floss_artifact("C:\\Users\\flare\\"));
+        assert!(is_floss_artifact("fefefefe"));
+        assert!(!is_floss_artifact("C:\\Users"));
+        assert!(!is_floss_artifact(".exe"));
     }
 
     #[test]
