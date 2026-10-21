@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>floss-rs in the browser</title>
+<style>
+/* the look of the floss-rs report: black and white, hairline borders, color only for state. */
+:root {
+  --c-black: #111; --c-dark: #333; --c-mid: #555; --c-light: #888;
+  --c-border: #e2e2e3; --c-bg: #fff; --c-bg-soft: #f9f9f9;
+  --c-success: #2c7a3f; --c-danger: #b3261e; --c-warn: #8a6d00;
+  --font-base: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "Menlo", "Monaco", "Consolas", "Liberation Mono", "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-black: #ececec; --c-dark: #cfcfcf; --c-mid: #a9a9a9; --c-light: #7f7f7f;
+    --c-border: #2f2f31; --c-bg: #121212; --c-bg-soft: #1a1a1b;
+    --c-success: #62c27a; --c-danger: #f0736a; --c-warn: #d6b33f;
+    color-scheme: dark;
+  }
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: var(--font-base); font-size: 16px; line-height: 1.6; color: var(--c-black); background: var(--c-bg); }
+main { max-width: 900px; margin: 0 auto; padding: 32px max(16px, env(safe-area-inset-right, 0px)) 64px max(16px, env(safe-area-inset-left, 0px)); }
+h1 { font-size: 1.6rem; font-weight: 400; }
+p { margin: 8px 0; max-width: 70ch; }
+a { color: inherit; }
+code { font-family: var(--font-mono); font-size: .85rem; }
+.lede { color: var(--c-dark); }
+.button { padding: 3px 8px; font-size: .8rem; line-height: 20px; border: 1px solid var(--c-border); background: var(--c-bg); color: var(--c-mid); font-family: inherit; cursor: pointer; user-select: none; display: inline-flex; gap: 6px; align-items: center; }
+.button:hover { border-color: var(--c-dark); color: var(--c-black); }
+.button.primary { background: var(--c-black); border-color: var(--c-black); color: var(--c-bg); }
+.badge { display: inline-block; font-size: .75rem; line-height: 20px; padding: 1px 8px; border: 1px solid var(--c-border); color: var(--c-mid); font-family: var(--font-mono); }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .85rem; line-height: 1.5; }
+th, td { border: 1px solid var(--c-border); padding: 6px 12px; text-align: left; vertical-align: top; }
+th { background: var(--c-bg-soft); font-weight: 400; color: var(--c-mid); }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); border-top: 1px solid var(--c-border); border-left: 1px solid var(--c-border); }
+.fact { border-right: 1px solid var(--c-border); border-bottom: 1px solid var(--c-border); padding: 12px 16px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.fact-value { font-family: var(--font-mono); font-size: 1.35rem; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.fact-key { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--c-light); line-height: 1.4; }
+.fact-note { font-size: .75rem; color: var(--c-mid); line-height: 1.4; }
+.panel { border: 1px solid var(--c-border); overflow: hidden; }
+.panel-body-head { padding: 4px 16px; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--c-light); background: var(--c-bg-soft); cursor: pointer; list-style: none; }
+.panel-body-head::-webkit-details-marker { display: none; }
+.panel-body-head::before { content: "▸ "; }
+details[open] > .panel-body-head::before { content: "▾ "; }
+details[open] > .panel-body-head { border-bottom: 1px solid var(--c-border); }
+.panel-body { padding: 10px 16px; max-height: 480px; overflow: auto; background: var(--c-bg-soft); }
+</style>
+<link rel="stylesheet" href="demo.css">
+</head>
+<body>
+<main>
+  <h1>floss-rs in the browser</h1>
+  <p class="lede">FLOSS finds the strings that malware hides: built on the stack, or decoded at runtime. This is floss-rs, its port to Rust, compiled to WebAssembly: it emulates the program's code in this page to find them.</p>
+<div class="demo" id="demo" data-sample="sample/sample.exe" data-autorun="1">
+  <div class="drop" id="drop">
+    <div class="drop-text">
+      <div class="drop-title">drop a Windows program here</div>
+      <div class="drop-note">a PE file (.exe, .dll), 32- or 64-bit. floss-rs runs in this page, as WebAssembly: the file never leaves your computer.</div>
+    </div>
+    <div class="drop-controls">
+      <label class="button primary" for="demo-file">choose a file</label>
+      <input type="file" id="demo-file" hidden>
+      <button type="button" class="button" id="demo-sample">run the sample</button>
+      <label class="field" for="demo-budget">time budget
+        <select id="demo-budget">
+          <option value="0">0s: the top 20</option>
+          <option value="5" selected>5s</option>
+          <option value="30">30s</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <div class="run">
+    <span class="run-file" id="demo-name">sample.exe</span>
+    <span id="demo-size">3KB</span>
+    <span class="run-state busy" id="demo-state">loading floss-rs…</span>
+  </div>
+
+  <div class="facts" id="demo-facts"></div>
+
+  <div class="scroll"><table class="found">
+    <thead><tr><th>string</th><th>found as</th><th>by routine</th></tr></thead>
+    <tbody id="demo-strings"></tbody>
+  </table></div>
+
+  <details class="panel">
+    <summary class="panel-body-head" id="demo-static-head">static strings</summary>
+    <div class="panel-body"><pre class="statics" id="demo-static"></pre></div>
+  </details>
+  <details class="panel">
+    <summary class="panel-body-head">log</summary>
+    <div class="panel-body"><pre class="log" id="demo-log"></pre></div>
+  </details>
+  <div class="drop-controls"><button type="button" class="button" id="demo-copy">copy results as JSON</button></div>
+</div>
+  <p><a href="https://github.com/williballenthin/flare-floss/tree/claude/loving-goodall-bint7q/rust">floss-rs</a> · build this page with <code>web/build.sh</code></p>
+</main>
+<script src="demo.js"></script>
+</body>
+</html>

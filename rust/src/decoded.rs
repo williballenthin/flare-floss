@@ -15,10 +15,11 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use lancelot::VA;
+use web_time::Instant;
 
 use crate::{
     driver::{self, Control, Limits, Observer},

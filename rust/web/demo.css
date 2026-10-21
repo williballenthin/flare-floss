@@ -1,0 +1,31 @@
+/* the drop zone and results of the in-browser floss-rs: built on the report's tokens (--c-*). */
+.demo { display: flex; flex-direction: column; gap: 12px; margin: 16px 0; }
+.demo .facts, .demo .scroll, .demo .panel { margin: 0; }
+.drop {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding: 20px;
+  border: 1px dashed var(--c-light); background: var(--c-bg-soft);
+}
+.drop.over { border-style: solid; border-color: var(--c-black); background: var(--c-bg); }
+.drop-text { flex: 1 1 260px; min-width: 0; line-height: 1.5; }
+.drop-title { font-weight: 600; }
+.drop-note { font-size: .8rem; color: var(--c-mid); }
+.drop-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.drop-controls label.field { display: inline-flex; align-items: center; gap: 6px; font-size: .8rem; color: var(--c-mid); }
+.drop-controls select { font: inherit; font-size: .8rem; color: var(--c-black); background: var(--c-bg); border: 1px solid var(--c-border); padding: 3px 6px; }
+.button:focus-visible, .drop-controls select:focus-visible { outline: 2px solid var(--c-black); outline-offset: 2px; }
+.button[disabled] { opacity: .5; cursor: default; }
+.run { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; padding: 6px 12px; border: 1px solid var(--c-border); font-family: var(--font-mono); font-size: .75rem; color: var(--c-mid); }
+.run-file { color: var(--c-black); overflow-wrap: anywhere; min-width: 0; }
+.run-state { margin-left: auto; }
+.run-state.busy { color: var(--c-warn); }
+.run-state.fail { color: var(--c-danger); }
+.run-state.ok { color: var(--c-success); }
+.found td.str { font-family: var(--font-mono); font-size: .8rem; overflow-wrap: anywhere; min-width: 16ch; }
+.found td.how { white-space: nowrap; }
+.found .badge { margin: 0 4px 2px 0; }
+.found td.by { font-family: var(--font-mono); font-size: .75rem; color: var(--c-mid); }
+.found .empty { color: var(--c-light); font-style: italic; }
+.log { font-family: var(--font-mono); font-size: .72rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.log .warn { color: var(--c-warn); }
+.log .error { color: var(--c-danger); }
+.statics { font-family: var(--font-mono); font-size: .75rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }

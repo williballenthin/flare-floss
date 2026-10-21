@@ -33,6 +33,20 @@ cargo build --profile dist --target x86_64-unknown-linux-musl
 
 That's a 28MB file, about 10% slower than the glibc build.
 
+### In a browser
+
+floss-rs also compiles to WebAssembly: `web/` is a page that analyzes a
+dropped PE file in the browser, without uploading it.
+
+```
+rustup target add wasm32-wasip1    # and clang, for zydis
+web/build.sh                       # builds web/floss_web.wasm (6MB)
+python3 -m http.server -d web      # then open http://localhost:8000
+```
+
+It's the same code, on one thread, at about half the native speed. See
+[DESIGN.md](doc/DESIGN.md#in-a-browser) for what it takes.
+
 Useful options:
 
   - `--only static stack tight decoded` / `--no ...`: choose string types.
@@ -78,6 +92,7 @@ deps/                submodules: open_sleigh (SLEIGH specifications),
                      win32json (win32metadata as JSON), phnt (native API headers)
 tests/               unit tests against Python FLOSS's string functions,
                      and end-to-end tests on programs in tests/programs
+web/                 the browser build: WebAssembly, and a page for it
 examples/            inspect (what lancelot sees), bench, difftest (vs Unicorn)
 scripts/             difftest_unicorn.py; budget/: how the time budget was chosen
 ```

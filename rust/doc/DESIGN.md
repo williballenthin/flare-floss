@@ -278,6 +278,30 @@ the glibc build, so a static build uses mimalloc, which leaves it ~10% slower
 (40 capa test files: 91s with glibc, 100s static). The `dist` profile leaves out
 debug information: the static binary is 28MB, of which 15MB is the signatures.
 
+## In a browser
+
+`web/` builds floss-rs as WebAssembly, for a page that analyzes a dropped
+file without uploading it. The code is the same; three things differ:
+
+  - **No JIT.** icicle's VM always creates its JIT, which generates machine
+    code with cranelift and maps it executable, which WebAssembly can't do.
+    floss-rs never enables the JIT, so the web build replaces icicle's
+    `icicle-jit` crate with a stub with the same interface
+    (`web/icicle-jit-stub`, through a Cargo `[patch]` that applies to the web
+    build only), rather than changing icicle.
+  - **WASI.** icicle reads the clock (`std::time::Instant`), which the
+    standard library provides in WebAssembly only on WASI (`wasm32-wasip1`).
+    The module imports six WASI functions (the clock, randomness, an empty
+    environment, stderr, exit), which `web/floss.js` implements, and exports
+    `floss_analyze`, which returns floss-rs's JSON results. floss-rs itself uses
+    `web_time::Instant`, which is `std`'s everywhere but the browser.
+  - **One thread**, in a web worker (`web/worker.js`). Threads would need
+    shared memory, which needs cross-origin isolation headers from the server.
+
+On 10 capa test files, the results are identical to the native build's, at
+about half its speed on one thread. FLOSS's FLIRT signatures are left out
+(15MB): the web build doesn't reference them, so the linker drops them.
+
 ## Choices, and what they cost
 
   - **One instruction at a time.** icicle can run whole blocks, and has a JIT,

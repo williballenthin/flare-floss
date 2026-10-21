@@ -1,0 +1,4 @@
+# WASI, rather than wasm32-unknown-unknown, because icicle reads the clock (std::time::Instant),
+# which needs WASI's clock_time_get; floss.js provides it, and the rest of what the module imports.
+[build]
+target = "wasm32-wasip1"

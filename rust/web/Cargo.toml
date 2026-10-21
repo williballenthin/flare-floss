@@ -1,0 +1,26 @@
+[package]
+name = "floss-web"
+version = "0.1.0"
+description = "floss-rs in the browser: WebAssembly (wasm32-wasip1), for web/index.html"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+floss = { path = ".." }
+serde_json = "1"
+log = "0.4"
+
+# icicle's JIT can't run in a browser, and floss-rs doesn't use it.
+[patch."https://github.com/icicle-emu/icicle-emu"]
+icicle-jit = { path = "icicle-jit-stub" }
+
+[profile.release]
+lto = true
+strip = true
+
+# its own workspace, so the [patch] above applies to this build only.
+[workspace]
