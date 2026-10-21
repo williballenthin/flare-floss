@@ -103,12 +103,15 @@ impl StackstringMonitor<'_> {
         self.contexts.extend(StackContext::capture(emu, pc, self.init_sp));
 
         let memory = emu.memory();
-        let mut found = vec![];
-        for change in memory.changes_since(&self.start, None) {
-            if change.region == Region::Global {
-                found.extend(strings::strings_touching(&memory, &change, self.min_length, &Default::default()));
-            }
-        }
+        let changes: Vec<_> = memory
+            .changes_since(&self.start, None)
+            .into_iter()
+            .filter(|change| change.region == Region::Global)
+            .collect();
+        let found: Vec<_> = strings::strings_touching(&self.start, &memory, &changes, self.min_length, &Default::default())
+            .into_iter()
+            .map(|w| (w.va, w.string))
+            .collect();
         if !found.is_empty() {
             self.globals.push(GlobalStrings { pc, strings: found });
         }

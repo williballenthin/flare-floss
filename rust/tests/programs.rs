@@ -3,15 +3,18 @@
 //! (rebuild the binaries with `tests/programs/build.sh`.)
 use std::collections::BTreeSet;
 
-fn found(name: &str) -> BTreeSet<String> {
+fn analyze(name: &str) -> floss::results::ResultDocument {
     let path = format!("{}/tests/programs/bin/{name}", env!("CARGO_MANIFEST_DIR"));
     let buf = std::fs::read(&path).unwrap();
     let opts = floss::Options {
         static_strings: false,
         ..Default::default()
     };
-    let doc = floss::analyze(&buf, &opts).unwrap();
-    let s = doc.strings;
+    floss::analyze(&buf, &opts).unwrap()
+}
+
+fn found(name: &str) -> BTreeSet<String> {
+    let s = analyze(name).strings;
     s.stack_strings
         .iter()
         .chain(s.tight_strings.iter())
@@ -53,4 +56,22 @@ fn wide_stackstring() {
 #[test]
 fn inline_decode() {
     check("inline-decode", "http://evil.example");
+}
+
+#[test]
+fn reused_buffer() {
+    for arch in ["32", "64"] {
+        for opt in ["O0", "O2"] {
+            let name = format!("reused-buffer-{arch}-{opt}.exe");
+            // the strings from the decoder, called from main, rather than from main emulated from its start.
+            let from_calls: Vec<_> = analyze(&name)
+                .strings
+                .decoded_strings
+                .into_iter()
+                .filter(|s| s.decoded_at != s.decoding_routine && s.string.contains("secret key"))
+                .map(|s| s.string)
+                .collect();
+            assert_eq!(from_calls.len(), 1, "{name}: found {from_calls:?}");
+        }
+    }
 }

@@ -223,18 +223,21 @@ pub fn extract_strings(
 
     extract_ascii_utf16(buf)
         .into_iter()
-        .filter(|s| s.string.len() <= MAX_STRING_LENGTH)
-        .filter(|s| !FP_STRINGS.contains(&s.string.as_str()))
-        .filter(|s| !is_floss_artifact(&s.string))
-        .filter_map(|s| {
-            let stripped = strip_string(&s.string);
-            if stripped.len() < min_length || exclude.contains(&stripped) {
-                None
-            } else {
-                Some(FoundString { string: stripped, ..s })
-            }
-        })
+        .filter_map(|s| clean(s, min_length, exclude))
         .collect()
+}
+
+/// drop junk strings, and strip junk from the rest, like FLOSS.
+fn clean(s: FoundString, min_length: usize, exclude: &std::collections::HashSet<String>) -> Option<FoundString> {
+    if s.string.len() > MAX_STRING_LENGTH || FP_STRINGS.contains(&s.string.as_str()) || is_floss_artifact(&s.string) {
+        return None;
+    }
+    let stripped = strip_string(&s.string);
+    if stripped.len() < min_length || exclude.contains(&stripped) {
+        None
+    } else {
+        Some(FoundString { string: stripped, ..s })
+    }
 }
 
 #[cfg(test)]
@@ -280,26 +283,69 @@ mod tests {
 /// how far around a change to look for the rest of a string that it touches.
 const CONTEXT: u64 = 1024;
 
-/// Find the strings in memory that a change touches, with their addresses.
+/// A string that some code wrote.
+#[derive(Debug, Clone)]
+pub struct Written {
+    /// where the string is.
+    pub va:      u64,
+    pub string:  FoundString,
+    /// the part of the string that changed, from its first changed character to its last:
+    /// where it is, and its text.
+    pub changed: (u64, String),
+}
+
+/// Find the strings that some code wrote: the strings in `after` that overlap the bytes
+/// that changed since `before`.
 ///
 /// FLOSS extracts strings from just the bytes that changed. But code may leave
 /// some bytes as they were: the zero high bytes of UTF-16 characters written to a zeroed
-/// buffer, or characters that happen to be the same in the ciphertext and plaintext.
-/// So look at the memory around the change, and report the strings that overlap it.
+/// buffer, or characters that are the same in the ciphertext and plaintext, like the
+/// first and last characters of a string decoded in place. So report the whole strings
+/// in memory that overlap the changes.
+///
+/// `changes` (from `MemoryView::changes_since`) say where to look.
 pub fn strings_touching(
-    memory: &crate::emu::MemoryView,
-    change: &crate::emu::snapshot::Change,
+    before: &crate::emu::MemoryView,
+    after: &crate::emu::MemoryView,
+    changes: &[crate::emu::snapshot::Change],
     min_length: usize,
     exclude: &std::collections::HashSet<String>,
-) -> Vec<(u64, FoundString)> {
-    let start = change.va.saturating_sub(CONTEXT);
-    let end = change.va + change.bytes.len() as u64 + CONTEXT;
-    let window = memory.read(start, (end - start) as usize);
-    let changed = change.va..change.va + change.bytes.len() as u64;
+) -> Vec<Written> {
+    let mut found = vec![];
+    // look at nearby changes together, since a string may span several of them,
+    // like a UTF-16 string written to zeroed memory, which changes every other byte.
+    for cluster in changes.chunk_by(|a, b| b.va <= a.va + a.bytes.len() as u64 + CONTEXT) {
+        let last = &cluster[cluster.len() - 1];
+        let start = cluster[0].va.saturating_sub(CONTEXT);
+        let len = (last.va + last.bytes.len() as u64 + CONTEXT - start) as usize;
+        let before = before.read(start, len);
+        let after = after.read(start, len);
 
-    extract_strings(&window, min_length, exclude)
-        .into_iter()
-        .map(|s| (start + s.offset as u64, s))
-        .filter(|(va, s)| *va < changed.end && changed.start < va + s.len as u64)
-        .collect()
+        for s in extract_ascii_utf16(&after) {
+            let width = match s.encoding {
+                Encoding::Ascii => 1,
+                Encoding::Utf16Le => 2,
+            };
+            let changed =
+                |i: usize| (s.offset + i * width..s.offset + (i + 1) * width).any(|j| after[j] != before[j]);
+            let n = s.len / width;
+            let Some(lo) = (0..n).find(|&i| changed(i)) else {
+                continue;
+            };
+            let hi = (0..n).rfind(|&i| changed(i)).unwrap_or(lo);
+            let changed = (
+                start + (s.offset + lo * width) as u64,
+                s.string.chars().skip(lo).take(hi + 1 - lo).collect(),
+            );
+
+            if let Some(s) = clean(s, min_length, exclude) {
+                found.push(Written {
+                    va: start + s.offset as u64,
+                    string: s,
+                    changed,
+                });
+            }
+        }
+    }
+    found
 }

@@ -10,7 +10,7 @@
 //!
 //! This is FLOSS's `string_decoder.py`, `function_argument_getter.py`, and `decoding_manager.py`.
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -207,6 +207,8 @@ pub fn decode_strings(
 fn decode_routine(ws: &Workspace, emu: &mut Emulator, routine: VA, min_length: usize) -> Vec<DecodedString> {
     let mut results = vec![];
     let mut seen: HashSet<String> = ws.referenced_strings(routine);
+    // the decoded part of each string reported so far, and where it is.
+    let mut seen_changed: HashSet<(VA, String)> = HashSet::new();
     let contexts = extract_call_contexts(ws, emu, routine);
     let n_calls = contexts.len();
     log::debug!("decoded: routine {routine:#x}: {n_calls} calls");
@@ -217,26 +219,50 @@ fn decode_routine(ws: &Workspace, emu: &mut Emulator, routine: VA, min_length: u
         }
 
         let (before, afters) = emulate_decoding_routine(emu, ctx);
+
+        // the strings in each view, by address. a string that grows from one view
+        // to the next, like one decoded a character at a time with an API call for each,
+        // is reported once, as it is at the end.
+        let mut found: Vec<strings::Written> = vec![];
+        // the index in `found` of the latest string at each address.
+        let mut latest: HashMap<VA, usize> = HashMap::new();
         for (i, after) in afters.iter().enumerate() {
             // only look at memory that changed since the previous view,
             // since strings elsewhere were already found.
             let previous = if i > 0 { Some(&afters[i - 1]) } else { None };
-            for change in after.changes_since(&before, previous) {
-                let address_type = AddressType::from(change.region);
-                for (va, s) in strings::strings_touching(after, &change, min_length, &seen) {
-                    if !seen.insert(s.string.clone()) {
-                        continue;
+            let changes = after.changes_since(&before, previous);
+            for w in strings::strings_touching(&before, after, &changes, min_length, &seen) {
+                match latest.get(&w.va) {
+                    Some(&i)
+                        if found[i].string.encoding == w.string.encoding
+                            && w.string.string.starts_with(&found[i].string.string) =>
+                    {
+                        found[i] = w;
                     }
-                    results.push(DecodedString {
-                        address: va,
-                        address_type,
-                        string: s.string,
-                        encoding: s.encoding,
-                        decoded_at: ctx.decoded_at,
-                        decoding_routine: routine,
-                    });
+                    _ => {
+                        latest.insert(w.va, found.len());
+                        found.push(w);
+                    }
                 }
             }
+        }
+
+        for w in found {
+            // the same decoded characters, at the same place, but with different neighbors
+            // than from an earlier call: these are leftovers from the call contexts,
+            // like the rest of a reused buffer, so report only the first.
+            if seen.contains(&w.string.string) || !seen_changed.insert(w.changed) {
+                continue;
+            }
+            seen.insert(w.string.string.clone());
+            results.push(DecodedString {
+                address: w.va,
+                address_type: AddressType::from(before.region(w.va)),
+                string: w.string.string,
+                encoding: w.string.encoding,
+                decoded_at: ctx.decoded_at,
+                decoding_routine: routine,
+            });
         }
     }
     results

@@ -200,13 +200,27 @@ wrote: on the stack these are tight strings; elsewhere they're decoded strings.
      with API models, and view memory before each call to an API that isn't
      modeled (where decoded strings are often consumed) and at the end.
   4. **Diff**: for each view, find the bytes that changed since the call, and
-     report the strings in memory that overlap them.
+     report the strings in memory that overlap them (`strings::strings_touching`).
 
 That last step differs from FLOSS on purpose: FLOSS extracts strings from the
 changed bytes only, so it misses UTF-16 strings decoded into zeroed buffers
 (the zero high bytes didn't change), misses or fragments strings decoded in
 place where some characters didn't change, and reports fragments like `hell`
 and `o world`.
+
+The cost is that a string may include neighboring bytes that the routine
+didn't write, like the rest of a reused buffer. Those can differ from one call
+context to the next, which would report one variant of the string per call
+(`key>`, `key*-`, ...). So each string carries its changed part, from its
+first changed character to its last, and a routine reports each changed part
+(at an address) once. Trimming strings to their changed part instead would
+be wrong: a string decoded in place can start or end with characters that
+the cipher leaves alone (Conti's `... /y`), and there's no telling those from
+leftovers.
+
+And a string that grows from one view to the next, like one decoded a
+character at a time with an API call after each, is reported once, as it is
+at the end, rather than as each of its prefixes.
 
 ## Choices, and what they cost
 

@@ -57,32 +57,34 @@ pub fn extract_tightstrings(
 
             // the strings the loop wrote to: on the stack, these are tight strings;
             // elsewhere (which FLOSS doesn't look for), they're decoded strings.
-            for change in after.changes_since(&before, None) {
-                for (va, s) in strings::strings_touching(&after, &change, min_length, &seen) {
-                    if !seen.insert(s.string.clone()) {
-                        continue;
-                    }
-                    if change.region == Region::Stack {
-                        tight.push(TightString {
-                            function:               *fva,
-                            string:                 s.string,
-                            encoding:               s.encoding,
-                            program_counter:        tl.start,
-                            stack_pointer:          sp,
-                            original_stack_pointer: init_sp,
-                            offset:                 va.wrapping_sub(sp),
-                            frame_offset:           init_sp.wrapping_sub(va).wrapping_sub(emu.pointer_size()),
-                        });
-                    } else {
-                        decoded.push(DecodedString {
-                            address:          va,
-                            address_type:     AddressType::from(change.region),
-                            string:           s.string,
-                            encoding:         s.encoding,
-                            decoded_at:       tl.start,
-                            decoding_routine: *fva,
-                        });
-                    }
+            let changes = after.changes_since(&before, None);
+            for strings::Written { va, string: s, .. } in
+                strings::strings_touching(&before, &after, &changes, min_length, &seen)
+            {
+                if !seen.insert(s.string.clone()) {
+                    continue;
+                }
+                let region = after.region(va);
+                if region == Region::Stack {
+                    tight.push(TightString {
+                        function:               *fva,
+                        string:                 s.string,
+                        encoding:               s.encoding,
+                        program_counter:        tl.start,
+                        stack_pointer:          sp,
+                        original_stack_pointer: init_sp,
+                        offset:                 va.wrapping_sub(sp),
+                        frame_offset:           init_sp.wrapping_sub(va).wrapping_sub(emu.pointer_size()),
+                    });
+                } else {
+                    decoded.push(DecodedString {
+                        address:          va,
+                        address_type:     AddressType::from(region),
+                        string:           s.string,
+                        encoding:         s.encoding,
+                        decoded_at:       tl.start,
+                        decoding_routine: *fva,
+                    });
                 }
             }
         }
