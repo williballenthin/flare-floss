@@ -115,6 +115,7 @@ pub struct Metadata {
     pub imagebase: u64,
     pub min_length: usize,
     pub runtime:   Runtime,
+    pub emulation: crate::emu::Stats,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

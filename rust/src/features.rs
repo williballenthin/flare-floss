@@ -300,7 +300,7 @@ fn argument_count(ws: &Workspace, f: &Function) -> usize {
                     let DecodedOperandKind::Reg(reg) = op.kind else {
                         continue;
                     };
-                    let Some(i) = args.iter().position(|&a| reg.get_largest_enclosing(zydis::MachineMode::LONG_64) == a) else {
+                    let Some(i) = args.iter().position(|&a| reg.largest_enclosing(zydis::MachineMode::LONG_64) == a) else {
                         continue;
                     };
                     if op.action.intersects(zydis::OperandAction::MASK_READ) && !written.contains(&i) {

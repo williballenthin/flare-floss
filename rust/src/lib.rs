@@ -158,6 +158,7 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
         doc.metadata.runtime.decoded_strings = seconds(t);
     }
 
+    doc.metadata.emulation = emu.stats.clone();
     doc.metadata.runtime.total = seconds(t0);
     Ok(doc)
 }

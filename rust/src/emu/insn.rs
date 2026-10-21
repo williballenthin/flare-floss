@@ -119,7 +119,7 @@ fn branch_target(insn: &dis::DecodedInstruction, va: VA) -> Option<VA> {
 fn is_mov_to_memory(insn: &dis::DecodedInstruction) -> bool {
     let is_mov = insn
         .mnemonic
-        .get_string()
+        .static_string()
         .map(|m| m.starts_with("mov"))
         .unwrap_or(false);
     if !is_mov {

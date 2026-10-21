@@ -11,6 +11,8 @@ use icicle_vm::cpu::{
     mem::{self, physical, MemoryMapping},
     Cpu,
 };
+use std::sync::OnceLock;
+
 use lancelot::VA;
 
 use super::{Layout, FILL_BYTE, PAGE_SIZE};
@@ -63,7 +65,7 @@ impl Snapshot {
     }
 
     pub fn memory(&self, layout: &Layout) -> MemoryView {
-        MemoryView::new(self.mem.clone(), layout.clone(), self.heap_next)
+        MemoryView::new(self.mem.clone(), layout.clone())
     }
 }
 
@@ -90,16 +92,24 @@ enum Page<'a> {
     Fill(u8),
 }
 
+/// the bytes of a page; unwritten pages are all one value.
+fn page_bytes<'a>(page: &Page<'a>) -> &'a [u8; physical::PAGE_SIZE] {
+    static FILLS: OnceLock<Vec<[u8; physical::PAGE_SIZE]>> = OnceLock::new();
+    match page {
+        Page::Data(data) => data,
+        Page::Fill(b) => &FILLS.get_or_init(|| (0..=255u8).map(|b| [b; physical::PAGE_SIZE]).collect())[*b as usize],
+    }
+}
+
 /// Read-only access to memory as of some snapshot.
 pub struct MemoryView {
-    mem:       mem::Snapshot,
-    layout:    Layout,
-    heap_next: VA,
+    mem:    mem::Snapshot,
+    layout: Layout,
 }
 
 impl MemoryView {
-    pub(super) fn new(mem: mem::Snapshot, layout: Layout, heap_next: VA) -> MemoryView {
-        MemoryView { mem, layout, heap_next }
+    pub(super) fn new(mem: mem::Snapshot, layout: Layout) -> MemoryView {
+        MemoryView { mem, layout }
     }
 
     pub fn region(&self, va: VA) -> Region {
@@ -156,14 +166,17 @@ impl MemoryView {
     ///   - within memory that existed before, report runs of bytes that differ,
     ///   - for memory that's new (heap allocations), report each run of new pages in full,
     ///   - ignore runs that are all zeros.
-    pub fn changes_since(&self, before: &MemoryView) -> Vec<Change> {
+    ///
+    /// with `previous`, only report runs that touch a page that changed since `previous`:
+    /// the other runs were already reported when diffing `previous`.
+    pub fn changes_since(&self, before: &MemoryView, previous: Option<&MemoryView>) -> Vec<Change> {
         let mut changes: Vec<Change> = vec![];
 
-        // the change being built, which may span pages.
-        let mut current: Option<Change> = None;
-        let flush = |current: &mut Option<Change>, changes: &mut Vec<Change>| {
-            if let Some(change) = current.take() {
-                if change.bytes.iter().any(|&b| b != 0) {
+        // the change being built, which may span pages, and whether it touches a page changed since `previous`.
+        let mut current: Option<(Change, bool)> = None;
+        let flush = |current: &mut Option<(Change, bool)>, changes: &mut Vec<Change>| {
+            if let Some((change, dirty)) = current.take() {
+                if dirty && change.bytes.iter().any(|&b| b != 0) {
                     changes.push(change);
                 }
             }
@@ -171,46 +184,76 @@ impl MemoryView {
 
         for page_va in self.mapped_pages() {
             let region = self.region(page_va);
-            let after = self.page(page_va);
+            let Some(after) = self.page(page_va) else {
+                continue;
+            };
+            let after = page_bytes(&after);
+            let dirty = match previous.and_then(|p| p.page(page_va)) {
+                Some(p) => {
+                    let p = page_bytes(&p);
+                    !(std::ptr::eq(p, after) || p == after)
+                }
+                None => true,
+            };
             let before_page = before.page(page_va);
+            let before_page = before_page.as_ref().map(page_bytes);
 
-            if let (Some(Page::Data(a)), Some(Page::Data(b))) = (&after, &before_page) {
-                if std::ptr::eq(*a, *b) {
-                    // still shared copy-on-write: nothing changed.
+            match before_page {
+                // unchanged: usually still shared copy-on-write, so this is cheap.
+                Some(b) if std::ptr::eq(b, after) || b == after => {
                     flush(&mut current, &mut changes);
                     continue;
                 }
+                // a new page that was never written, like a fresh heap allocation.
+                None if after.iter().all(|&b| b == 0) => {
+                    flush(&mut current, &mut changes);
+                    continue;
+                }
+                _ => {}
             }
 
-            let read = |page: &Option<Page>, i: usize| -> u8 {
-                match page {
-                    Some(Page::Data(d)) => d[i],
-                    Some(Page::Fill(b)) => *b,
-                    None => FILL_BYTE,
-                }
-            };
-
-            for i in 0..PAGE_SIZE as usize {
-                let va = page_va + i as u64;
-                let new = read(&after, i);
-                // new pages are reported in full.
-                let differs = before_page.is_none() || read(&before_page, i) != new;
-                if differs {
-                    match &mut current {
-                        Some(change) if change.va + change.bytes.len() as u64 == va && change.region == region => {
-                            change.bytes.push(new)
-                        }
-                        _ => {
-                            flush(&mut current, &mut changes);
-                            current = Some(Change {
-                                va,
-                                bytes: vec![new],
-                                region,
-                            });
+            // walk the page in spans of differing and equal bytes.
+            let differs = |i: usize| before_page.map(|b| b[i] != after[i]).unwrap_or(true);
+            let mut i = 0;
+            while i < after.len() {
+                if !differs(i) {
+                    flush(&mut current, &mut changes);
+                    // skip equal bytes quickly, a word at a time.
+                    if let Some(b) = before_page {
+                        while i + 8 <= after.len() && b[i..i + 8] == after[i..i + 8] {
+                            i += 8;
                         }
                     }
-                } else {
-                    flush(&mut current, &mut changes);
+                    while i < after.len() && !differs(i) {
+                        i += 1;
+                    }
+                    continue;
+                }
+
+                let start = i;
+                while i < after.len() && differs(i) {
+                    i += 1;
+                }
+                let va = page_va + start as u64;
+                let span = &after[start..i];
+                match &mut current {
+                    Some((change, change_dirty))
+                        if change.va + change.bytes.len() as u64 == va && change.region == region =>
+                    {
+                        change.bytes.extend_from_slice(span);
+                        *change_dirty |= dirty;
+                    }
+                    _ => {
+                        flush(&mut current, &mut changes);
+                        current = Some((
+                            Change {
+                                va,
+                                bytes: span.to_vec(),
+                                region,
+                            },
+                            dirty,
+                        ));
+                    }
                 }
             }
         }

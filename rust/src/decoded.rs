@@ -9,7 +9,7 @@
 //!   3. look for strings in the memory that changed.
 //!
 //! This is FLOSS's `string_decoder.py`, `function_argument_getter.py`, and `decoding_manager.py`.
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use lancelot::VA;
 
@@ -49,15 +49,18 @@ fn options() -> ExecOptions {
 }
 
 /// Find the states at each call to the routine, by exploring its callers.
+///
+/// Each caller is explored once, collecting the state at every call to the routine;
+/// the order of the contexts follows the order of the call sites.
 pub fn extract_call_contexts(ws: &Workspace, emu: &mut Emulator, routine: VA) -> Vec<CallContext> {
     struct CallMonitor {
-        call_site: VA,
-        contexts:  Vec<CallContext>,
+        call_sites: BTreeSet<VA>,
+        contexts:   Vec<CallContext>,
     }
 
     impl Observer for CallMonitor {
         fn before(&mut self, emu: &mut Emulator, insn: &Insn) -> Control {
-            if insn.va == self.call_site && insn.flow == Flow::Call {
+            if insn.flow == Flow::Call && self.call_sites.contains(&insn.va) {
                 self.contexts.push(CallContext {
                     state:          emu.snapshot(),
                     decoded_at:     insn.va,
@@ -68,25 +71,29 @@ pub fn extract_call_contexts(ws: &Workspace, emu: &mut Emulator, routine: VA) ->
         }
     }
 
-    let call_sites: std::collections::BTreeSet<VA> = ws.callers(routine).collect();
-    let mut contexts = vec![];
-    for call_site in call_sites {
-        let Some(caller) = ws.function_containing(call_site) else {
-            continue;
-        };
-        if caller == routine {
+    // call sites, grouped by the function that contains them.
+    let mut callers: BTreeMap<VA, BTreeSet<VA>> = Default::default();
+    for call_site in ws.callers(routine) {
+        match ws.function_containing(call_site) {
             // ignore recursion.
-            continue;
+            Some(caller) if caller != routine => {
+                callers.entry(caller).or_default().insert(call_site);
+            }
+            _ => {}
         }
+    }
 
+    let mut contexts = vec![];
+    for (caller, call_sites) in callers {
         emu.reset(caller);
         let mut monitor = CallMonitor {
-            call_site,
+            call_sites,
             contexts: vec![],
         };
         driver::explore(emu, &options(), &mut monitor);
         contexts.extend(monitor.contexts);
     }
+    contexts.sort_by_key(|ctx| ctx.decoded_at);
     contexts
 }
 
@@ -152,8 +159,11 @@ pub fn decode_strings(ws: &Workspace, emu: &mut Emulator, routines: &[VA], min_l
             }
 
             let (before, afters) = emulate_decoding_routine(emu, ctx);
-            for after in afters.iter() {
-                for change in after.changes_since(&before) {
+            for (i, after) in afters.iter().enumerate() {
+                // only look at memory that changed since the previous view,
+                // since strings elsewhere were already found.
+                let previous = if i > 0 { Some(&afters[i - 1]) } else { None };
+                for change in after.changes_since(&before, previous) {
                     let address_type = AddressType::from(change.region);
                     for s in strings::extract_strings(&change.bytes, min_length, &seen) {
                         if !seen.insert(s.string.clone()) {

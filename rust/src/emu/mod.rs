@@ -188,7 +188,6 @@ pub enum Fault {
 
 /// The varnodes for the registers that FLOSS needs by name.
 struct Registers {
-    pc:   pcode::VarNode,
     sp:   pcode::VarNode,
     /// return value: eax/rax.
     ret:  pcode::VarNode,
@@ -211,7 +210,6 @@ impl Registers {
 
         Ok(match arch {
             Arch::X32 => Registers {
-                pc:   get("EIP")?,
                 sp:   get("ESP")?,
                 ret:  get("EAX")?,
                 args: vec![],
@@ -221,7 +219,6 @@ impl Registers {
                     .collect::<Result<_>>()?,
             },
             Arch::X64 => Registers {
-                pc:   get("RIP")?,
                 sp:   get("RSP")?,
                 ret:  get("RAX")?,
                 args: ["RCX", "RDX", "R8", "R9"].iter().map(|n| get(n)).collect::<Result<_>>()?,
@@ -254,7 +251,21 @@ impl IoMemory for Void {
     }
 }
 
+/// Counters describing what the emulator did.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Stats {
+    /// instructions executed (`rep` iterations count once each).
+    pub instructions:  u64,
+    pub api_calls:     u64,
+    pub snapshots:     u64,
+    pub snapshot_us:   u64,
+    pub restore_us:    u64,
+    /// instructions icicle couldn't emulate, by reason and mnemonic.
+    pub unsupported:   BTreeMap<String, u64>,
+}
+
 pub struct Emulator {
+    pub stats:       Stats,
     vm:              icicle_vm::Vm,
     pub arch:        Arch,
     regs:            Registers,
@@ -357,6 +368,7 @@ impl Emulator {
         }
 
         let mut emu = Emulator {
+            stats: Default::default(),
             vm,
             arch,
             regs,
@@ -397,11 +409,17 @@ impl Emulator {
     }
 
     pub fn snapshot(&mut self) -> Snapshot {
-        Snapshot::capture(&mut self.vm.cpu, self.heap_next)
+        let t = std::time::Instant::now();
+        self.stats.snapshots += 1;
+        let s = Snapshot::capture(&mut self.vm.cpu, self.heap_next);
+        self.stats.snapshot_us += t.elapsed().as_micros() as u64;
+        s
     }
 
     pub fn restore(&mut self, snapshot: &Snapshot) {
+        let t = std::time::Instant::now();
         self.heap_next = snapshot.restore_into(&mut self.vm.cpu);
+        self.stats.restore_us += t.elapsed().as_micros() as u64;
     }
 
     pub fn pc(&self) -> VA {
@@ -520,7 +538,7 @@ impl Emulator {
 
     /// a view of the current memory contents.
     pub fn memory(&mut self) -> MemoryView {
-        MemoryView::new(self.vm.cpu.mem.snapshot(), self.layout.clone(), self.heap_next)
+        MemoryView::new(self.vm.cpu.mem.snapshot(), self.layout.clone())
     }
 
     // --- APIs ---
@@ -635,15 +653,21 @@ impl Emulator {
     /// step icicle by exactly one instruction (or one iteration of a `rep` instruction).
     fn step_icicle(&mut self) -> std::result::Result<(), Fault> {
         let pc = self.pc();
-        match self.vm.step(1) {
-            VmExit::InstructionLimit => Ok(()),
-            VmExit::UnhandledException((code, value)) => Err(match code {
+        self.stats.instructions += 1;
+        let fault = match self.vm.step(1) {
+            VmExit::InstructionLimit => return Ok(()),
+            VmExit::UnhandledException((code, value)) => match code {
                 ExceptionCode::ExecViolation | ExceptionCode::ReadUnmapped => Fault::NotExecutable(value),
                 ExceptionCode::InvalidInstruction => Fault::InvalidInstruction(pc),
-                _ => Fault::Unsupported(pc, format!("{code:?} {value:#x}")),
-            }),
-            exit => Err(Fault::Unsupported(pc, format!("{exit:?}"))),
+                _ => Fault::Unsupported(pc, format!("{code:?}")),
+            },
+            exit => Fault::Unsupported(pc, format!("{exit:?}")),
+        };
+        if let Fault::Unsupported(_, reason) = &fault {
+            let mnemonic = self.vm.get_disasm(pc).unwrap_or("?").split(' ').next().unwrap_or("?").to_string();
+            *self.stats.unsupported.entry(format!("{reason}: {mnemonic}")).or_default() += 1;
         }
+        Err(fault)
     }
 
     /// Execute the instruction at the program counter.
@@ -658,6 +682,7 @@ impl Emulator {
             // we got here via a call, a jump (like a thunk), or even a return;
             // in any case, the return address is on the top of the stack.
             let name = self.stubs[&pc].qualified_name();
+            self.stats.api_calls += 1;
             return Ok(match api::call(self, pc, &name, opts.api_models) {
                 true => Event::Stop,
                 false => Event::Executed(None),
