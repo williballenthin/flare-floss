@@ -8,14 +8,17 @@
 //!     moves to memory (the string might never be used in a call).
 //!
 //! This is FLOSS's `stackstrings.py`.
+//!
+//! At the same checkpoints, also look for strings that the function wrote to global memory
+//! (which FLOSS doesn't). These are reported as decoded strings, since they have addresses.
 use std::collections::{BTreeSet, HashSet};
 
 use lancelot::VA;
 
 use crate::{
     driver::{self, Control, Observer},
-    emu::{CallPolicy, Emulator, ExecOptions, Flow, Insn},
-    results::StackString,
+    emu::{snapshot::Region, CallPolicy, Emulator, ExecOptions, Flow, Insn, MemoryView},
+    results::{AddressType, DecodedString, StackString},
     strings,
     workspace::Workspace,
 };
@@ -76,8 +79,18 @@ impl StackContext {
     }
 }
 
+/// Strings written to global memory, found at some checkpoint.
+pub struct GlobalStrings {
+    pub pc:      VA,
+    pub strings: Vec<(VA, strings::FoundString)>,
+}
+
 struct StackstringMonitor<'a> {
     init_sp:   VA,
+    /// memory when the function started.
+    start:     MemoryView,
+    min_length: usize,
+    globals:   Vec<GlobalStrings>,
     /// the last instruction of each basic block in the program.
     bb_ends:   &'a BTreeSet<VA>,
     /// moves to memory in the current basic block.
@@ -85,10 +98,27 @@ struct StackstringMonitor<'a> {
     contexts:  Vec<StackContext>,
 }
 
+impl StackstringMonitor<'_> {
+    fn checkpoint(&mut self, emu: &mut Emulator, pc: VA) {
+        self.contexts.extend(StackContext::capture(emu, pc, self.init_sp));
+
+        let memory = emu.memory();
+        let mut found = vec![];
+        for change in memory.changes_since(&self.start, None) {
+            if change.region == Region::Global {
+                found.extend(strings::strings_touching(&memory, &change, self.min_length, &Default::default()));
+            }
+        }
+        if !found.is_empty() {
+            self.globals.push(GlobalStrings { pc, strings: found });
+        }
+    }
+}
+
 impl Observer for StackstringMonitor<'_> {
     fn before(&mut self, emu: &mut Emulator, insn: &Insn) -> Control {
         if insn.flow == Flow::Call {
-            self.contexts.extend(StackContext::capture(emu, insn.va, self.init_sp));
+            self.checkpoint(emu, insn.va);
         }
         Control::Continue
     }
@@ -101,7 +131,7 @@ impl Observer for StackstringMonitor<'_> {
         // like FLOSS, this checks whether the *next* instruction ends a block.
         if self.bb_ends.contains(&emu.pc()) {
             if self.mov_count >= MIN_NUMBER_OF_MOVS {
-                self.contexts.extend(StackContext::capture(emu, insn.va, self.init_sp));
+                self.checkpoint(emu, insn.va);
             }
             self.mov_count = 0;
         }
@@ -113,7 +143,7 @@ pub fn extract_stackstrings(
     emu: &mut Emulator,
     functions: &[VA],
     min_length: usize,
-) -> Vec<StackString> {
+) -> (Vec<StackString>, Vec<DecodedString>) {
     let bb_ends: BTreeSet<VA> = ws
         .functions()
         .flat_map(|f| f.blocks.values().map(|bb| bb.last_insn()))
@@ -127,11 +157,15 @@ pub fn extract_stackstrings(
     };
 
     let mut results = vec![];
+    let mut globals = vec![];
     for &fva in functions {
         let mut seen = ws.referenced_strings(fva);
 
         emu.reset(fva);
         let mut monitor = StackstringMonitor {
+            start:     emu.memory(),
+            min_length,
+            globals:   vec![],
             init_sp:   emu.sp(),
             bb_ends:   &bb_ends,
             mov_count: 0,
@@ -146,6 +180,21 @@ pub fn extract_stackstrings(
                 }
             }
         }
+
+        for g in monitor.globals.iter() {
+            for (va, s) in g.strings.iter() {
+                if seen.insert(s.string.clone()) {
+                    globals.push(DecodedString {
+                        address:          *va,
+                        address_type:     AddressType::Global,
+                        string:           s.string.clone(),
+                        encoding:         s.encoding,
+                        decoded_at:       g.pc,
+                        decoding_routine: fva,
+                    });
+                }
+            }
+        }
     }
-    results
+    (results, globals)
 }

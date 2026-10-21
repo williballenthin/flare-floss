@@ -1,0 +1,7 @@
+LIBRARY kernel32.dll
+EXPORTS
+OutputDebugStringA@4
+OutputDebugStringW@4
+GetProcessHeap@0
+HeapAlloc@12
+ExitProcess@4

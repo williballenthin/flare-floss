@@ -258,6 +258,8 @@ pub struct Stats {
     pub instructions:  u64,
     pub api_calls:     u64,
     pub snapshots:     u64,
+    /// times the lifted code was discarded, because of self-modifying code.
+    pub code_flushes:  u64,
     pub snapshot_us:   u64,
     pub restore_us:    u64,
     /// instructions icicle couldn't emulate, by reason and mnemonic.
@@ -406,6 +408,17 @@ impl Emulator {
         }
         self.set_sp(self.layout.initial_sp);
         self.set_pc(pc);
+    }
+
+    /// restore the emulator to its state right after loading, as if the function at `pc`
+    /// was just called. returns the return address, which is in the void.
+    pub fn reset_for_call(&mut self, pc: VA) -> VA {
+        self.reset(pc);
+        let ret = self.layout.modules.end - PAGE_SIZE;
+        let sp = self.sp() - self.pointer_size();
+        self.set_sp(sp);
+        let _ = self.write_ptr(sp, ret);
+        ret
     }
 
     pub fn snapshot(&mut self) -> Snapshot {
@@ -654,7 +667,24 @@ impl Emulator {
     fn step_icicle(&mut self) -> std::result::Result<(), Fault> {
         let pc = self.pc();
         self.stats.instructions += 1;
-        let fault = match self.vm.step(1) {
+        let mut exit = self.vm.step(1);
+        if let VmExit::UnhandledException((ExceptionCode::SelfModifyingCode, addr)) = exit {
+            // icicle doesn't support self-modifying code: it refuses writes to code it has
+            // lifted, and won't re-lift an address whose bytes changed (even after restoring
+            // a snapshot). so forget all the lifted code and try again.
+            self.stats.code_flushes += 1;
+            self.vm.code.flush_code();
+            let page = addr & !(PAGE_SIZE - 1);
+            let exec = self.vm.cpu.mem.get_perm(addr) & perm::EXEC;
+            let _ = self
+                .vm
+                .cpu
+                .mem
+                .update_perm(page, PAGE_SIZE, perm::READ | perm::WRITE | perm::INIT | exec);
+            self.set_pc(pc);
+            exit = self.vm.step(1);
+        }
+        let fault = match exit {
             VmExit::InstructionLimit => return Ok(()),
             VmExit::UnhandledException((code, value)) => match code {
                 ExceptionCode::ExecViolation | ExceptionCode::ReadUnmapped => Fault::NotExecutable(value),

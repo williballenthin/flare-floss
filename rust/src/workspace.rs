@@ -187,6 +187,21 @@ impl Workspace {
             }
         }
 
+        // a call to a thunk, like `jmp sub_401017`, is a call to the thunk's target, too.
+        // (compilers sometimes start a function with a jump into its loop,
+        // which looks like a thunk to a separate function.)
+        for &thunk in thunks.iter() {
+            let Some(flows) = cfg.flows.flows_by_src.get(&thunk) else {
+                continue;
+            };
+            for flow in flows.iter() {
+                if let Flow::UnconditionalJump(Target::Direct(dst)) = flow {
+                    let thunk_callers = callers.get(&thunk).cloned().unwrap_or_default();
+                    callers.entry(*dst).or_default().extend(thunk_callers);
+                }
+            }
+        }
+
         Ok(Workspace {
             module,
             cfg,

@@ -23,6 +23,8 @@ pub struct FoundString {
     pub string:   String,
     /// offset into the buffer.
     pub offset:   usize,
+    /// bytes in the buffer, before any junk was stripped from the string.
+    pub len:      usize,
     pub encoding: Encoding,
 }
 
@@ -48,12 +50,14 @@ pub fn extract_ascii_utf16(buf: &[u8]) -> Vec<FoundString> {
     let ascii = ascii_re().find_iter(buf).map(|m| FoundString {
         string:   String::from_utf8_lossy(m.as_bytes()).to_string(),
         offset:   m.start(),
+        len:      m.len(),
         encoding: Encoding::Ascii,
     });
 
     let utf16 = utf16_re().find_iter(buf).map(|m| FoundString {
         string:   m.as_bytes().iter().step_by(2).map(|&b| b as char).collect(),
         offset:   m.start(),
+        len:      m.len(),
         encoding: Encoding::Utf16Le,
     });
 
@@ -255,4 +259,31 @@ mod tests {
         assert_eq!(strip_string("[ESC]"), "[ESC]");
         assert_eq!(strip_string("a-b!c"), "abc");
     }
+}
+
+/// how far around a change to look for the rest of a string that it touches.
+const CONTEXT: u64 = 1024;
+
+/// Find the strings in memory that a change touches, with their addresses.
+///
+/// FLOSS extracts strings from just the bytes that changed. But code may leave
+/// some bytes as they were: the zero high bytes of UTF-16 characters written to a zeroed
+/// buffer, or characters that happen to be the same in the ciphertext and plaintext.
+/// So look at the memory around the change, and report the strings that overlap it.
+pub fn strings_touching(
+    memory: &crate::emu::MemoryView,
+    change: &crate::emu::snapshot::Change,
+    min_length: usize,
+    exclude: &std::collections::HashSet<String>,
+) -> Vec<(u64, FoundString)> {
+    let start = change.va.saturating_sub(CONTEXT);
+    let end = change.va + change.bytes.len() as u64 + CONTEXT;
+    let window = memory.read(start, (end - start) as usize);
+    let changed = change.va..change.va + change.bytes.len() as u64;
+
+    extract_strings(&window, min_length, exclude)
+        .into_iter()
+        .map(|s| (start + s.offset as u64, s))
+        .filter(|(va, s)| *va < changed.end && changed.start < va + s.len as u64)
+        .collect()
 }

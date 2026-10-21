@@ -33,9 +33,10 @@ const FUNCTION_SHORTCUT_THRESHOLD_VERY_OFTEN: usize = 15;
 
 /// The emulator state at a call to a decoding routine.
 pub struct CallContext {
-    /// the state with the program counter at the call instruction.
+    /// the state with the program counter at the call instruction
+    /// (or, when the routine has no callers, at the routine).
     pub state:          Snapshot,
-    /// the call instruction.
+    /// the call instruction (or, when the routine has no callers, the routine).
     pub decoded_at:     VA,
     pub return_address: VA,
 }
@@ -84,6 +85,16 @@ pub fn extract_call_contexts(ws: &Workspace, emu: &mut Emulator, routine: VA) ->
     }
 
     let mut contexts = vec![];
+    if callers.is_empty() {
+        // nothing calls the routine; it may be the entry point, an export, or a callback.
+        // so emulate it as if it were called, with no particular arguments.
+        let return_address = emu.reset_for_call(routine);
+        contexts.push(CallContext {
+            state: emu.snapshot(),
+            decoded_at: routine,
+            return_address,
+        });
+    }
     for (caller, call_sites) in callers {
         emu.reset(caller);
         let mut monitor = CallMonitor {
@@ -165,12 +176,12 @@ pub fn decode_strings(ws: &Workspace, emu: &mut Emulator, routines: &[VA], min_l
                 let previous = if i > 0 { Some(&afters[i - 1]) } else { None };
                 for change in after.changes_since(&before, previous) {
                     let address_type = AddressType::from(change.region);
-                    for s in strings::extract_strings(&change.bytes, min_length, &seen) {
+                    for (va, s) in strings::strings_touching(after, &change, min_length, &seen) {
                         if !seen.insert(s.string.clone()) {
                             continue;
                         }
                         results.push(DecodedString {
-                            address: change.va + s.offset as u64,
+                            address: va,
                             address_type,
                             string: s.string,
                             encoding: s.encoding,
