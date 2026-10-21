@@ -10,13 +10,14 @@
 //!   - there's a stack and a heap (a bump allocator used by the API models),
 //!   - every other address is backed by the `Void`: reads return `FILL_BYTE`
 //!     and writes are discarded; so wild reads and writes don't stop emulation.
-//!   - imported functions are synthetic "stub" addresses. Execution never
-//!     actually reaches them: `execute` notices when the program counter
-//!     lands on a stub and handles the API call (see `api`).
+//!   - imported functions are synthetic "stub" addresses in the void.
+//!     A stub decodes as a pseudo-instruction (`Flow::Api`) that calls the API
+//!     model and returns (see `api`), so a program can call, jump to, or even
+//!     return to an import, and observers see API calls as instructions.
 //!
 //! The emulator executes one instruction at a time (`execute`);
 //! the strategies for exploring code live in `crate::driver`.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{anyhow, Result};
 use icicle_vm::cpu::{
@@ -37,7 +38,7 @@ pub use insn::{Flow, Insn};
 pub use snapshot::{MemoryView, Snapshot};
 
 /// byte used to fill memory that the program never initialized:
-/// the stack, and pages that appear on demand.
+/// the stack, and the void.
 /// this matches vivisect's "taint byte" as configured by FLOSS.
 pub const FILL_BYTE: u8 = 0xFE;
 
@@ -60,8 +61,9 @@ pub struct Layout {
     /// the initial stack pointer at the start of each emulation.
     pub initial_sp: VA,
     pub heap: std::ops::Range<VA>,
-    /// import stubs and handles returned by LoadLibrary et al. are never mapped.
+    /// import stubs, in the void.
     pub stubs: std::ops::Range<VA>,
+    /// handles returned by LoadLibrary et al., in the void.
     pub modules: std::ops::Range<VA>,
 }
 
@@ -132,7 +134,7 @@ pub enum CallPolicy {
 #[derive(Debug, Clone, Copy)]
 pub struct ExecOptions {
     pub calls: CallPolicy,
-    /// use the API models (`api::Model`) for imports and recognized library functions,
+    /// use the API models (see `api`) for imports and recognized library functions,
     /// rather than just returning 0.
     pub api_models: bool,
     /// the most iterations of a `rep`-prefixed instruction to emulate;
@@ -251,6 +253,64 @@ impl IoMemory for Void {
     }
 }
 
+/// Map the image's sections, and return their page-aligned ranges.
+///
+/// sections are mapped writable, even if they aren't in the program,
+/// since decoders sometimes decode in place. that's more permissive than vivisect.
+fn map_image(vm: &mut icicle_vm::Vm, ws: &Workspace) -> Result<Vec<std::ops::Range<VA>>> {
+    let mut image: Vec<std::ops::Range<VA>> = vec![];
+    for section in ws.module().sections.iter() {
+        let start = section.virtual_range.start & !(PAGE_SIZE - 1);
+        let end = (section.virtual_range.end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        if start >= end {
+            continue;
+        }
+        let mut p = perm::READ | perm::WRITE | perm::INIT;
+        if section.permissions.intersects(lancelot::module::Permissions::X) {
+            p |= perm::EXEC;
+        }
+        // sections may share pages; the first mapping wins, which is fine since we copy bytes below.
+        vm.cpu.mem.map_memory_len(start, end - start, Mapping { perm: p, value: 0 });
+        image.push(start..end);
+    }
+
+    for section in ws.module().sections.iter() {
+        let range = &section.virtual_range;
+        let buf = ws
+            .module()
+            .address_space
+            .read_bytes(range.start, (range.end - range.start) as usize)
+            .unwrap_or_default();
+        if !buf.is_empty() {
+            vm.cpu
+                .mem
+                .write_bytes(range.start, &buf, perm::NONE)
+                .map_err(|e| anyhow!("failed to write section {}: {e:?}", section.name))?;
+        }
+    }
+    Ok(image)
+}
+
+/// Back every address that isn't the image or stack with the void.
+/// (heap allocations are carved out of the void as they're made.)
+fn map_void(vm: &mut icicle_vm::Vm, layout: &Layout, arch: Arch) {
+    let void = vm.cpu.mem.register_io_handler(Void);
+    let mut used: Vec<std::ops::Range<VA>> = layout.image.clone();
+    used.push(layout.stack.clone());
+    used.sort_by_key(|r| r.start);
+    let top: u64 = match arch {
+        Arch::X32 => 1 << 32,
+        Arch::X64 => u64::MAX,
+    };
+    let mut cursor = 0u64;
+    for r in used.iter().chain(std::iter::once(&(top..top))) {
+        if r.start > cursor {
+            vm.cpu.mem.map_memory_len(cursor, r.start - cursor, void);
+        }
+        cursor = cursor.max(r.end);
+    }
+}
+
 /// Counters describing what the emulator did.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Stats {
@@ -288,7 +348,7 @@ pub struct Emulator {
     /// for x86 functions in the program: bytes of arguments the callee pops (`ret N`).
     callee_cleanup:  BTreeMap<VA, u16>,
     /// functions that just jump to another function, like `jmp [__imp_malloc]`.
-    thunks:          std::collections::BTreeSet<VA>,
+    thunks:          BTreeSet<VA>,
 }
 
 impl Emulator {
@@ -313,60 +373,17 @@ impl Emulator {
 
         let regs = Registers::new(&vm, arch)?;
         let decoder = lancelot::analysis::dis::get_disassembler(ws.module())?;
-
-        // map the image.
-        let mut image: Vec<std::ops::Range<VA>> = vec![];
-        for section in ws.module().sections.iter() {
-            let start = section.virtual_range.start & !(PAGE_SIZE - 1);
-            let end = (section.virtual_range.end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            if start >= end {
-                continue;
-            }
-            let mut p = perm::READ | perm::WRITE | perm::INIT;
-            if section.permissions.intersects(lancelot::module::Permissions::X) {
-                p |= perm::EXEC;
-            }
-            // sections may share pages; later sections win, which is fine since we copy bytes below.
-            vm.cpu.mem.map_memory_len(start, end - start, Mapping { perm: p, value: 0 });
-            image.push(start..end);
-        }
-        for section in ws.module().sections.iter() {
-            let range = &section.virtual_range;
-            let buf = ws
-                .module()
-                .address_space
-                .read_bytes(range.start, (range.end - range.start) as usize)
-                .unwrap_or_default();
-            if !buf.is_empty() {
-                vm.cpu
-                    .mem
-                    .write_bytes(range.start, &buf, perm::NONE)
-                    .map_err(|e| anyhow!("failed to write section {}: {e:?}", section.name))?;
-            }
-        }
-
+        let image = map_image(&mut vm, ws)?;
         let layout = Layout::new(image)?;
-
         vm.cpu.mem.map_memory_len(layout.stack.start, STACK_SIZE, Mapping {
             perm:  perm::READ | perm::WRITE | perm::INIT,
             value: FILL_BYTE,
         });
+        map_void(&mut vm, &layout, arch);
 
-        // everything else is the void.
-        let void = vm.cpu.mem.register_io_handler(Void);
-        let mut used: Vec<std::ops::Range<VA>> = layout.image.clone();
-        used.push(layout.stack.clone());
-        used.sort_by_key(|r| r.start);
-        let top: u64 = match arch {
-            Arch::X32 => 1 << 32,
-            Arch::X64 => u64::MAX,
-        };
-        let mut cursor = 0u64;
-        for r in used.iter().chain(std::iter::once(&(top..top))) {
-            if r.start > cursor {
-                vm.cpu.mem.map_memory_len(cursor, r.start - cursor, void);
-            }
-            cursor = cursor.max(r.end);
+        // the SSE control register's power-on value: round to nearest, exceptions masked.
+        if let Some(mxcsr) = vm.cpu.arch.sleigh.get_varnode("MXCSR") {
+            vm.cpu.write_reg(mxcsr, 0x1f80);
         }
 
         let mut emu = Emulator {
@@ -457,10 +474,6 @@ impl Emulator {
 
     pub fn pointer_size(&self) -> u64 {
         self.arch.pointer_size() as u64
-    }
-
-    pub fn heap_next(&self) -> VA {
-        self.heap_next
     }
 
     // --- memory ---

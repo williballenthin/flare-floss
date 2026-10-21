@@ -124,8 +124,8 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
     doc.metadata.runtime.find_features = seconds(t);
 
     // strings that the stack and tight string passes found in global memory or the heap;
-    // reported with the decoded strings.
-    let mut constructed_global_strings = vec![];
+    // they have addresses, like decoded strings, so they're reported with them.
+    let mut decoded_elsewhere = vec![];
     if opts.stack_strings {
         let t = Instant::now();
         // functions with tight loops get tight string extraction instead,
@@ -139,7 +139,7 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
         let (stack_strings, global_strings) =
             stackstrings::extract_stackstrings(&ws, &mut emu, &functions, opts.min_length);
         doc.strings.stack_strings = stack_strings;
-        constructed_global_strings = global_strings;
+        decoded_elsewhere.extend(global_strings);
         doc.metadata.runtime.stack_strings = seconds(t);
     }
 
@@ -154,7 +154,7 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
         let (tight_strings, decoded_strings) =
             tightstrings::extract_tightstrings(&ws, &mut emu, &functions, opts.min_length);
         doc.strings.tight_strings = tight_strings;
-        constructed_global_strings.extend(decoded_strings);
+        decoded_elsewhere.extend(decoded_strings);
         doc.metadata.runtime.tight_strings = seconds(t);
     }
 
@@ -164,12 +164,15 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
         doc.analysis.functions_analyzed_decoded_strings = routines.len();
         doc.analysis.decoding_function_scores = routines.iter().map(|va| (*va, features[va].score)).collect();
         doc.strings.decoded_strings = decoded::decode_strings(&ws, &mut emu, &routines, opts.min_length);
-        for s in constructed_global_strings {
-            if !doc.strings.decoded_strings.iter().any(|d| d.string == s.string) {
-                doc.strings.decoded_strings.push(s);
-            }
-        }
         doc.metadata.runtime.decoded_strings = seconds(t);
+    }
+
+    let mut seen: std::collections::HashSet<String> =
+        doc.strings.decoded_strings.iter().map(|s| s.string.clone()).collect();
+    for s in decoded_elsewhere {
+        if seen.insert(s.string.clone()) {
+            doc.strings.decoded_strings.push(s);
+        }
     }
 
     doc.metadata.emulation = emu.stats.clone();
