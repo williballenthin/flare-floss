@@ -167,16 +167,19 @@ impl MemoryView {
     ///   - for memory that's new (heap allocations), report each run of new pages in full,
     ///   - ignore runs that are all zeros.
     ///
-    /// with `previous`, only report runs that touch a page that changed since `previous`:
-    /// the other runs were already reported when diffing `previous`.
+    /// with `previous`, only look at pages that changed since `previous`, since the changes
+    /// elsewhere were already reported when diffing `previous`. a run that crosses into
+    /// a page that didn't change is cut off there; `strings::strings_touching`, which looks
+    /// around each change, still finds the whole string. this keeps diffing many views of one
+    /// emulation proportional to what changed between them, rather than to all it has written.
     pub fn changes_since(&self, before: &MemoryView, previous: Option<&MemoryView>) -> Vec<Change> {
         let mut changes: Vec<Change> = vec![];
 
-        // the change being built, which may span pages, and whether it touches a page changed since `previous`.
-        let mut current: Option<(Change, bool)> = None;
-        let flush = |current: &mut Option<(Change, bool)>, changes: &mut Vec<Change>| {
-            if let Some((change, dirty)) = current.take() {
-                if dirty && change.bytes.iter().any(|&b| b != 0) {
+        // the change being built, which may span pages.
+        let mut current: Option<Change> = None;
+        let flush = |current: &mut Option<Change>, changes: &mut Vec<Change>| {
+            if let Some(change) = current.take() {
+                if change.bytes.iter().any(|&b| b != 0) {
                     changes.push(change);
                 }
             }
@@ -188,13 +191,13 @@ impl MemoryView {
                 continue;
             };
             let after = page_bytes(&after);
-            let dirty = match previous.and_then(|p| p.page(page_va)) {
-                Some(p) => {
-                    let p = page_bytes(&p);
-                    !(std::ptr::eq(p, after) || p == after)
+            if let Some(p) = previous.and_then(|p| p.page(page_va)) {
+                let p = page_bytes(&p);
+                if std::ptr::eq(p, after) || p == after {
+                    flush(&mut current, &mut changes);
+                    continue;
                 }
-                None => true,
-            };
+            }
             let before_page = before.page(page_va);
             let before_page = before_page.as_ref().map(page_bytes);
 
@@ -237,22 +240,16 @@ impl MemoryView {
                 let va = page_va + start as u64;
                 let span = &after[start..i];
                 match &mut current {
-                    Some((change, change_dirty))
-                        if change.va + change.bytes.len() as u64 == va && change.region == region =>
-                    {
+                    Some(change) if change.va + change.bytes.len() as u64 == va && change.region == region => {
                         change.bytes.extend_from_slice(span);
-                        *change_dirty |= dirty;
                     }
                     _ => {
                         flush(&mut current, &mut changes);
-                        current = Some((
-                            Change {
-                                va,
-                                bytes: span.to_vec(),
-                                region,
-                            },
-                            dirty,
-                        ));
+                        current = Some(Change {
+                            va,
+                            bytes: span.to_vec(),
+                            region,
+                        });
                     }
                 }
             }

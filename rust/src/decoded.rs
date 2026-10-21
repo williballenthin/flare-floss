@@ -20,7 +20,7 @@ use crate::{
     driver::{self, Control, Limits, Observer},
     emu::{CallPolicy, Emulator, ExecOptions, Flow, Insn, MemoryView, Snapshot},
     features::Candidates,
-    results::{AddressType, DecodedString},
+    results::{AddressType, DecodedString, DecodingRoutine},
     strings,
     workspace::Workspace,
 };
@@ -161,26 +161,42 @@ fn should_shortcut(n: usize, n_calls: usize, found_strings: usize) -> bool {
 
 /// Emulate the candidate decoding routines and collect the strings they decode:
 /// all the required candidates, then extra candidates until `budget` is spent.
-/// Returns the strings, and how many routines were emulated.
+/// Returns the strings, and the routines that were emulated.
 pub fn decode_strings(
     ws: &Workspace,
     emu: &mut Emulator,
     candidates: &Candidates,
     budget: Duration,
     min_length: usize,
-) -> (Vec<DecodedString>, usize) {
+) -> (Vec<DecodedString>, Vec<DecodingRoutine>) {
     let t0 = Instant::now();
     let mut results = vec![];
+    let mut routines = vec![];
+    let mut decode = |routine: VA, required: bool, results: &mut Vec<DecodedString>, routines: &mut Vec<DecodingRoutine>| {
+        let t = Instant::now();
+        let (strings, calls) = decode_routine(ws, emu, routine, min_length);
+        routines.push(DecodingRoutine {
+            address: routine,
+            score: candidates.features[&routine].score,
+            required,
+            calls,
+            strings: strings.len(),
+            seconds: t.elapsed().as_secs_f64(),
+            features: candidates.features[&routine].summary(),
+        });
+        results.extend(strings);
+    };
+
     for &routine in candidates.required.iter() {
-        results.extend(decode_routine(ws, emu, routine, min_length));
+        decode(routine, true, &mut results, &mut routines);
     }
-    let mut emulated = candidates.required.len();
 
     let elapsed = t0.elapsed();
     if elapsed < budget && !candidates.extra.is_empty() {
         log::info!(
-            "emulated the top {emulated} candidate decoding routines in {:.1}s; \
+            "emulated the top {} candidate decoding routines in {:.1}s; \
              emulating more candidates, up to the {:.1}s time budget, for more thorough results",
+            routines.len(),
             elapsed.as_secs_f64(),
             budget.as_secs_f64()
         );
@@ -189,22 +205,23 @@ pub fn decode_strings(
             if t0.elapsed() >= budget {
                 break;
             }
-            results.extend(decode_routine(ws, emu, routine, min_length));
-            emulated += 1;
+            decode(routine, false, &mut results, &mut routines);
         }
         log::info!(
-            "emulated {emulated} of {} candidate decoding routines in {:.1}s; the extra routines decoded {} strings",
+            "emulated {} of {} candidate decoding routines in {:.1}s; the extra routines decoded {} strings",
+            routines.len(),
             candidates.required.len() + candidates.extra.len(),
             t0.elapsed().as_secs_f64(),
             results.len() - required
         );
     }
 
-    (results, emulated)
+    (results, routines)
 }
 
 /// Emulate one candidate decoding routine from each of its call contexts.
-fn decode_routine(ws: &Workspace, emu: &mut Emulator, routine: VA, min_length: usize) -> Vec<DecodedString> {
+/// Returns the strings, and the number of call contexts.
+fn decode_routine(ws: &Workspace, emu: &mut Emulator, routine: VA, min_length: usize) -> (Vec<DecodedString>, usize) {
     let mut results = vec![];
     let mut seen: HashSet<String> = ws.referenced_strings(routine);
     // the decoded part of each string reported so far, and where it is.
@@ -265,5 +282,5 @@ fn decode_routine(ws: &Workspace, emu: &mut Emulator, routine: VA, min_length: u
             });
         }
     }
-    results
+    (results, n_calls)
 }

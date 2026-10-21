@@ -105,8 +105,26 @@ pub struct Analysis {
     pub functions_analyzed_stack_strings: usize,
     pub functions_analyzed_tight_strings: usize,
     pub functions_analyzed_decoded_strings: usize,
-    /// candidate decoding routines and their scores.
-    pub decoding_function_scores:        Vec<(u64, f64)>,
+    /// functions that could have been emulated as decoding routines.
+    pub decoding_candidates:             usize,
+    /// the candidate decoding routines that were emulated, in order.
+    pub decoding_routines:               Vec<DecodingRoutine>,
+}
+
+/// A candidate decoding routine, and what emulating it cost.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DecodingRoutine {
+    pub address: u64,
+    pub score:   f64,
+    /// one of the candidates that are always emulated (the top-scoring ones, and tight functions).
+    pub required: bool,
+    /// call contexts it was emulated from.
+    pub calls:   usize,
+    /// decoded strings it reported, which are listed in order in `decoded_strings`.
+    pub strings: usize,
+    pub seconds: f64,
+    /// the features that made it a candidate, as counts.
+    pub features: std::collections::BTreeMap<&'static str, usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

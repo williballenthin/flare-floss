@@ -220,17 +220,12 @@ pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
     if opts.decoded_strings {
         let t = Instant::now();
         let candidates = features::rank_decoding_functions(&features, opts.top_functions);
-        let (decoded_strings, emulated) =
+        let (decoded_strings, routines) =
             decoded::decode_strings(&ws, &mut emu, &candidates, opts.time_budget, opts.min_length);
         doc.strings.decoded_strings = decoded_strings;
-        doc.analysis.functions_analyzed_decoded_strings = emulated;
-        doc.analysis.decoding_function_scores = candidates
-            .required
-            .iter()
-            .chain(candidates.extra.iter())
-            .take(emulated)
-            .map(|va| (*va, features[va].score))
-            .collect();
+        doc.analysis.decoding_candidates = candidates.required.len() + candidates.extra.len();
+        doc.analysis.functions_analyzed_decoded_strings = routines.len();
+        doc.analysis.decoding_routines = routines;
         doc.metadata.runtime.decoded_strings = seconds(t);
     }
 

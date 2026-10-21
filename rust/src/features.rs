@@ -103,6 +103,29 @@ impl FunctionFeatures {
             .collect()
     }
 
+    /// the features, as counts by name, for reporting.
+    pub fn summary(&self) -> BTreeMap<&'static str, usize> {
+        let mut out = BTreeMap::new();
+        for f in &self.features {
+            let (name, n) = match f {
+                Feature::BlockCount(n) => ("blocks", *n),
+                Feature::InstructionCount(n) => ("instructions", *n),
+                Feature::Arguments(n) => ("arguments", *n),
+                Feature::CallsTo { count, .. } => ("calls_to", *count),
+                Feature::Loop(_) => ("loops", 1),
+                Feature::TightLoop(_) => ("tight_loops", 1),
+                Feature::TightFunction => ("tight_function", 1),
+                Feature::Nzxor(_) => ("nzxor", 1),
+                Feature::Shift(_) => ("shifts", 1),
+                Feature::Mov(_) => ("movs", 1),
+                Feature::NzxorTightLoop => ("nzxor_tight_loop", 1),
+                Feature::NzxorLoop => ("nzxor_loop", 1),
+            };
+            *out.entry(name).or_insert(0) += n;
+        }
+        out
+    }
+
     pub fn is_tight_function(&self) -> bool {
         self.features.contains(&Feature::TightFunction)
     }
@@ -492,6 +515,7 @@ fn writes_memory(ws: &Workspace, bb: &BasicBlock) -> bool {
 pub struct Candidates {
     pub required: Vec<VA>,
     pub extra:    Vec<VA>,
+    pub features: BTreeMap<VA, FunctionFeatures>,
 }
 
 pub fn rank_decoding_functions(features: &BTreeMap<VA, FunctionFeatures>, count: usize) -> Candidates {
@@ -506,5 +530,9 @@ pub fn rank_decoding_functions(features: &BTreeMap<VA, FunctionFeatures>, count:
         }
     }
     let extra = ranked.iter().map(|f| f.va).filter(|va| !required.contains(va)).collect();
-    Candidates { required, extra }
+    Candidates {
+        required,
+        extra,
+        features: features.clone(),
+    }
 }
