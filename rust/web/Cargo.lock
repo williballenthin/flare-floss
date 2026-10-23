@@ -700,8 +700,8 @@ dependencies = [
 
 [[package]]
 name = "lancelot"
-version = "0.10.1"
-source = "git+https://github.com/williballenthin/lancelot?rev=7dd6b4389f929e4b4cb5a1118ca8f50396ae0925#7dd6b4389f929e4b4cb5a1118ca8f50396ae0925"
+version = "0.10.2"
+source = "git+https://github.com/williballenthin/lancelot?tag=v0.10.2#9de1820bf36872175a08987882dc42f6112d2f44"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",
@@ -723,8 +723,8 @@ dependencies = [
 
 [[package]]
 name = "lancelot-flirt"
-version = "0.10.1"
-source = "git+https://github.com/williballenthin/lancelot?rev=7dd6b4389f929e4b4cb5a1118ca8f50396ae0925#7dd6b4389f929e4b4cb5a1118ca8f50396ae0925"
+version = "0.10.2"
+source = "git+https://github.com/williballenthin/lancelot?tag=v0.10.2#9de1820bf36872175a08987882dc42f6112d2f44"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",
