@@ -339,11 +339,10 @@ fn decode_routine(ws: &Workspace, emu: &mut Emulator, routine: VA, min_length: u
                 continue;
             }
             seen.insert(w.string.string.clone());
-            let (writers, overwritten_writers) = crate::results::split_writers(&emu.writers(mark, w.va, w.string.len));
+            let writers = emu.writers(mark, w.va, w.string.len);
             let uses = emu.uses(mark, w.va, w.string.len);
             results.push(DecodedString {
                 writers,
-                overwritten_writers,
                 readers: uses.readers,
                 passed_to: uses.passed_to,
                 address: w.va,

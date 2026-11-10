@@ -251,12 +251,13 @@ is incremental.
 ### Which instructions wrote and used a string
 
 Each string in the results has `writers`, the instructions whose bytes are
-still in the string, and `overwritten_writers`, the instructions that wrote
-there before them, like the first loop of a buffer that is decoded in place.
-It also has its uses: `readers`, the instructions that read the finished
-string, and `passed_to`, the calls that took a pointer into it as an argument.
-All four are lists of instruction addresses, in order. The IDA plugin puts
-the strings in the listing with them (see [In IDA](#in-ida)).
+still in the string. An instruction whose bytes were all replaced isn't
+among them, like the loop that copies a buffer before a second loop decodes
+it in place. Each string also has its uses: `readers`, the instructions that
+read the finished string, and `passed_to`, the calls that took a pointer
+into it as an argument. All three are lists of instruction addresses, in
+order. The IDA plugin puts the strings in the listing with them (see
+[In IDA](#in-ida)).
 
 Hooks on the image, stack, and heap append a record (instruction, kind,
 start, length) to the access log in `emu/access.rs` for each write and read.
@@ -270,7 +271,8 @@ memory as the call that reached it, so the call is a writer of a string that
 `memcpy` copies.
 
 To find the writers of a string, the log walks back from the view's mark and
-subtracts each record's range from the bytes that no later record covers.
+subtracts each record's range from the bytes that no later record covers,
+until none are left. A record that covers some of those bytes is a writer.
 
 To find the uses, it walks back to the last write to the string, which is
 where its contents are complete, and then follows every path that continues

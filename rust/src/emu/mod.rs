@@ -660,7 +660,7 @@ impl Emulator {
     }
 
     /// the instructions that wrote `[va, va+len)`, as of `mark`.
-    pub fn writers(&self, mark: access::Mark, va: VA, len: usize) -> Vec<access::Writer> {
+    pub fn writers(&self, mark: access::Mark, va: VA, len: usize) -> Vec<VA> {
         self.log.borrow().writers(mark, va, len)
     }
 

@@ -70,7 +70,7 @@ impl StackContext {
             .into_iter()
             .map(|s| {
                 let va = self.sp + s.offset as u64;
-                let (writers, overwritten_writers) = crate::results::split_writers(&emu.writers(self.mark, va, s.len));
+                let writers = emu.writers(self.mark, va, s.len);
                 let uses = emu.uses(self.mark, va, s.len);
                 StackString {
                 function:               fva,
@@ -84,7 +84,6 @@ impl StackContext {
                     .wrapping_sub(s.offset as u64)
                     .wrapping_sub(pointer_size),
                 writers,
-                overwritten_writers,
                 readers:                uses.readers,
                 passed_to:              uses.passed_to,
             }})
@@ -203,12 +202,10 @@ pub fn extract_stackstrings(
         for g in monitor.globals.iter() {
             for (va, s) in g.strings.iter() {
                 if seen.insert(s.string.clone()) {
-                    let (writers, overwritten_writers) =
-                        crate::results::split_writers(&emu.writers(g.mark, *va, s.len));
+                    let writers = emu.writers(g.mark, *va, s.len);
                     let uses = emu.uses(g.mark, *va, s.len);
                     globals.push(DecodedString {
                         writers,
-                        overwritten_writers,
                         readers:          uses.readers,
                         passed_to:        uses.passed_to,
                         address:          *va,

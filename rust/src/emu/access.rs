@@ -55,14 +55,6 @@ impl Mark {
     pub const START: Mark = Mark(NONE);
 }
 
-/// An instruction that wrote part of some memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Writer {
-    pub pc:    VA,
-    /// whether some of the bytes it wrote are still there, rather than overwritten later.
-    pub final_: bool,
-}
-
 /// The instructions that used some memory once its contents were complete.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Uses {
@@ -229,29 +221,28 @@ impl AccessLog {
         uses
     }
 
-    /// The instructions that wrote `[start, start+len)` on the path up to `mark`,
-    /// by address.
-    pub fn writers(&self, mark: Mark, start: VA, len: usize) -> Vec<Writer> {
+    /// The instructions whose bytes are in `[start, start+len)` at `mark`, by address:
+    /// those that wrote there on the path up to the mark, less those whose bytes
+    /// later writes replaced.
+    pub fn writers(&self, mark: Mark, start: VA, len: usize) -> Vec<VA> {
         let end = start + len as u64;
         // the bytes that no later write has covered yet, as sorted, disjoint ranges.
         let mut uncovered: Vec<(VA, VA)> = vec![(start, end)];
-        let mut writers: Vec<Writer> = vec![];
+        let mut writers: Vec<VA> = vec![];
         let mut i = mark.0;
-        while i != NONE {
+        while i != NONE && !uncovered.is_empty() {
             let r = self.records[i as usize];
             i = r.parent;
             if r.kind != Kind::Write || !r.overlaps(start, end) {
                 continue;
             }
             let (rs, re) = (r.start, r.start + r.len as u64);
-            let mut final_ = false;
             let mut next = Vec::with_capacity(uncovered.len() + 1);
             for &(us, ue) in &uncovered {
                 if ue <= rs || re <= us {
                     next.push((us, ue));
                     continue;
                 }
-                final_ = true;
                 if us < rs {
                     next.push((us, rs));
                 }
@@ -259,18 +250,13 @@ impl AccessLog {
                     next.push((re, ue));
                 }
             }
+            if next != uncovered {
+                writers.push(r.pc);
+            }
             uncovered = next;
-            writers.push(Writer { pc: r.pc, final_ });
         }
         writers.sort();
-        writers.dedup_by(|b, a| {
-            if a.pc == b.pc {
-                a.final_ |= b.final_;
-                true
-            } else {
-                false
-            }
-        });
+        writers.dedup();
         writers
     }
 }
@@ -278,10 +264,6 @@ impl AccessLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn pcs(ws: &[Writer]) -> Vec<(VA, bool)> {
-        ws.iter().map(|w| (w.pc, w.final_)).collect()
-    }
 
     #[test]
     fn test_paths_stay_apart() {
@@ -299,8 +281,8 @@ mod tests {
         log.write(0x1001, 1);
         let right = log.mark();
 
-        assert_eq!(pcs(&log.writers(left, 0x1000, 2)), vec![(0x10, true), (0x20, true)]);
-        assert_eq!(pcs(&log.writers(right, 0x1000, 2)), vec![(0x10, true), (0x30, true)]);
+        assert_eq!(log.writers(left, 0x1000, 2), vec![0x10, 0x20]);
+        assert_eq!(log.writers(right, 0x1000, 2), vec![0x10, 0x30]);
     }
 
     #[test]
@@ -317,8 +299,8 @@ mod tests {
         }
         assert_eq!(log.len(), 2);
         let mark = log.mark();
-        assert_eq!(pcs(&log.writers(mark, 0x1000, 4)), vec![(0x10, false), (0x20, true)]);
-        assert_eq!(pcs(&log.writers(mark, 0x2000, 4)), vec![]);
+        assert_eq!(log.writers(mark, 0x1000, 4), vec![0x20]);
+        assert_eq!(log.writers(mark, 0x2000, 4), Vec::<VA>::new());
     }
 
     #[test]
@@ -329,8 +311,8 @@ mod tests {
         let before = log.mark();
         log.write(0x1001, 1);
         let after = log.mark();
-        assert_eq!(pcs(&log.writers(before, 0x1001, 1)), vec![]);
-        assert_eq!(pcs(&log.writers(after, 0x1001, 1)), vec![(0x10, true)]);
+        assert_eq!(log.writers(before, 0x1001, 1), Vec::<VA>::new());
+        assert_eq!(log.writers(after, 0x1001, 1), vec![0x10]);
     }
 
     #[test]

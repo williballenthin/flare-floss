@@ -70,8 +70,7 @@ pub fn extract_tightstrings(
 
             driver::explore(emu, &opts, &mut driver::Nothing);
             for strings::Written { va, string: s, .. } in found {
-                let (writers, overwritten_writers) =
-                    crate::results::split_writers(&emu.writers(after.mark, va, s.len));
+                let writers = emu.writers(after.mark, va, s.len);
                 let uses = emu.uses(after.mark, va, s.len);
                 let region = after.region(va);
                 if region == Region::Stack {
@@ -85,7 +84,6 @@ pub fn extract_tightstrings(
                         offset:                 va.wrapping_sub(sp),
                         frame_offset:           init_sp.wrapping_sub(va).wrapping_sub(emu.pointer_size()),
                         writers,
-                        overwritten_writers,
                         readers:                uses.readers,
                         passed_to:              uses.passed_to,
                     });
@@ -98,7 +96,6 @@ pub fn extract_tightstrings(
                         decoded_at:       tl.start,
                         decoding_routine: *fva,
                         writers,
-                        overwritten_writers,
                         readers:          uses.readers,
                         passed_to:        uses.passed_to,
                     });

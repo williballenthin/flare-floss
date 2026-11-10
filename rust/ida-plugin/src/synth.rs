@@ -205,7 +205,6 @@ mod tests {
             offset:                 0,
             frame_offset:           0,
             writers:                writers.to_vec(),
-            overwritten_writers:    vec![],
             readers:                vec![],
             passed_to:              passed_to.to_vec(),
         }
@@ -220,7 +219,6 @@ mod tests {
             decoded_at,
             decoding_routine: routine,
             writers: vec![0x1110, 0x1120],
-            overwritten_writers: vec![],
             readers: vec![0x1130],
             passed_to: vec![0x1140],
         }
