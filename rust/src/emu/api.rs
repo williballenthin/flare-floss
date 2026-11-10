@@ -20,6 +20,8 @@ use super::Emulator;
 const MODULE_FILENAME: &str = "C:\\Users\\flare\\program.exe";
 const CURRENT_PROCESS: u64 = 7331;
 const PROCESS_HEAP: u64 = 42;
+/// GetLastError after GetEnvironmentVariable finds nothing.
+const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
 const MAX_STRING: usize = 512;
 
 /// How many bytes of arguments each Windows API pops when it returns, on x86,
@@ -203,7 +205,20 @@ const MODELS: &[(&[&str], Model)] = &[
     }),
     (&["sprintf"], |emu, _| sprintf(emu, false)),
     (&["snprintf"], |emu, _| sprintf(emu, true)),
-    (&["getlasterror"], |_, _| Outcome::Return(0)),
+    (&["heaprealloc", "rtlreallocateheap"], |emu, _| {
+        let (p, size) = (emu.arg(2), emu.arg(3));
+        reallocate(emu, p, size)
+    }),
+    (&["realloc", "realloc_base"], |emu, _| {
+        let (p, size) = (emu.arg(0), emu.arg(1));
+        reallocate(emu, p, size)
+    }),
+    // no environment variables: callers, like Rust's std::env::var, take their defaults.
+    (&["getenvironmentvariablea", "getenvironmentvariablew"], |emu, _| {
+        emu.last_error = ERROR_ENVVAR_NOT_FOUND;
+        Outcome::Return(0)
+    }),
+    (&["getlasterror"], |emu, _| Outcome::Return(emu.last_error as u64)),
     (&["getcurrentprocess"], |_, _| Outcome::Return(CURRENT_PROCESS)),
     (&["initializecriticalsection"], |emu, _| {
         let p = emu.arg(0);
@@ -263,6 +278,18 @@ fn allocate(emu: &mut Emulator, size: u64) -> Outcome {
         Ok(va) => Outcome::Return(va),
         Err(_) => Outcome::Return(0),
     }
+}
+
+/// a new block of `size` bytes, with the contents of the block at `p` (the heap doesn't know
+/// how big that was, so this copies `size` bytes: the rest is the old block's neighbors).
+fn reallocate(emu: &mut Emulator, p: VA, size: u64) -> Outcome {
+    let Ok(va) = emu.allocate(size) else {
+        return Outcome::Return(0);
+    };
+    if p != 0 {
+        copy(emu, va, p, size);
+    }
+    Outcome::Return(va)
 }
 
 fn copy(emu: &mut Emulator, dst: VA, src: VA, n: u64) -> Outcome {

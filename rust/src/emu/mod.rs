@@ -355,6 +355,8 @@ pub struct Emulator {
     modules:         BTreeMap<VA, String>,
     /// the next free address in the heap; part of the snapshotted state.
     heap_next:       VA,
+    /// what GetLastError returns: set by the API models that fail on purpose.
+    pub last_error:  u32,
     /// the state right after loading, before any emulation.
     pristine:        Option<Snapshot>,
     /// names of functions in the program (imports, exports, FLIRT matches),
@@ -408,6 +410,7 @@ impl Emulator {
             arch,
             regs,
             heap_next: layout.heap.start,
+            last_error: 0,
             layout,
             decoder,
             insns: Default::default(),
@@ -465,6 +468,7 @@ impl Emulator {
     pub fn restore(&mut self, snapshot: &Snapshot) {
         let t = std::time::Instant::now();
         self.heap_next = snapshot.restore_into(&mut self.vm.cpu);
+        self.last_error = 0;
         self.stats.restore_us += t.elapsed().as_micros() as u64;
     }
 
