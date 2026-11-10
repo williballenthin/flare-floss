@@ -56,6 +56,7 @@ memory, and a rule for which strings to report.
 | `emu/insn.rs` | ~100 | instruction classification: control flow, `rep`, `mov` to memory |
 | `emu/api.rs` | ~420 | API models (malloc, memcpy, GetProcAddress, ...) and calling conventions |
 | `emu/snapshot.rs` | ~260 | snapshots of emulator state, and memory diffs |
+| `emu/writes.rs` | ~220 | the write log: which instructions wrote which memory, on each path |
 | `emu/sleigh.rs` | ~190 | the embedded SLEIGH specs, and icicle VMs built from them |
 | `driver.rs` | ~230 | strategies: explore every path, explore to an address, run to an address |
 | `strings.rs` | ~310 | finding strings in bytes, FLOSS's junk filters |
@@ -246,6 +247,30 @@ heap allocator's state. A `Snapshot` takes about 4µs.
 views, by region (stack, global, heap). With a previous view, it only reports
 runs that touch pages written since, so diffing many views of one emulation
 is incremental.
+
+### Which instructions wrote a string
+
+Each string in the results has `writers`, the instructions whose bytes are
+still in the string, and `overwritten_writers`, the instructions that wrote
+there before them, like the first loop of a buffer that is decoded in place.
+
+A write hook on the image, stack, and heap appends a record (instruction,
+start, length) to the write log in `emu/writes.rs`. Each record points at the
+record before it on the same path. Because `explore` forks the state at each
+branch, the records form a tree, and a snapshot or memory view keeps only a
+`Mark`, the index of the newest record on its path. Restoring a snapshot moves
+the tail back to its mark. To find the writers of a string, the log walks back
+from the view's mark and subtracts each record's range from the bytes that no
+later record covers. Consecutive writes by one instruction to adjacent bytes
+extend one record, so a decoding loop or `rep stosb` costs one record.
+
+The analyses clear the log before each function, so marks from an earlier
+function are not valid. The log keeps at most 4M records. Writes by API
+models, like memcpy, go through `write_mem`, which the hooks don't see, so a
+string that an API copies has no writers.
+
+On the test programs, the log costs 3 to 6% of decoding time, and the largest
+log holds about 30k records.
 
 ### Self-modifying code
 

@@ -36,6 +36,7 @@ pub mod api;
 pub mod insn;
 pub mod sleigh;
 pub mod snapshot;
+pub mod writes;
 mod x86;
 
 pub use insn::{Flow, Insn};
@@ -336,6 +337,9 @@ pub struct Stats {
     pub code_flushes:  u64,
     pub snapshot_us:   u64,
     pub restore_us:    u64,
+    /// the most write log records at once, and the writes they stand for.
+    pub write_records_max: u64,
+    pub writes_logged: u64,
     /// instructions icicle couldn't emulate, by reason and mnemonic.
     pub unsupported:   BTreeMap<String, u64>,
 }
@@ -348,6 +352,8 @@ impl Stats {
         self.code_flushes += other.code_flushes;
         self.snapshot_us += other.snapshot_us;
         self.restore_us += other.restore_us;
+        self.write_records_max = self.write_records_max.max(other.write_records_max);
+        self.writes_logged += other.writes_logged;
         for (k, v) in other.unsupported.iter() {
             *self.unsupported.entry(k.clone()).or_default() += v;
         }
@@ -378,6 +384,8 @@ pub struct Emulator {
     callee_cleanup:  BTreeMap<VA, u16>,
     /// functions that just jump to another function, like `jmp [__imp_malloc]`.
     thunks:          BTreeSet<VA>,
+    /// which instructions wrote which memory, filled in by a write hook.
+    writes:          writes::SharedWriteLog,
 }
 
 impl Emulator {
@@ -410,6 +418,24 @@ impl Emulator {
 
         x86::install(&mut vm);
 
+        let writes: writes::SharedWriteLog = std::rc::Rc::new(std::cell::RefCell::new(writes::WriteLog::new()));
+        let ranges: Vec<std::ops::Range<VA>> = layout
+            .image
+            .iter()
+            .cloned()
+            .chain([layout.stack.clone(), layout.heap.clone()])
+            .collect();
+        for r in ranges {
+            let log = writes.clone();
+            vm.cpu.mem.add_write_hook(
+                r.start,
+                r.end,
+                Box::new(move |_: &mut icicle_vm::cpu::Mmu, addr: u64, value: &[u8]| {
+                    log.borrow_mut().record(addr, value.len());
+                }),
+            );
+        }
+
         // the SSE control register's power-on value: round to nearest, exceptions masked.
         if let Some(mxcsr) = vm.cpu.arch.sleigh.get_varnode("MXCSR") {
             vm.cpu.write_reg(mxcsr, 0x1f80);
@@ -427,6 +453,7 @@ impl Emulator {
             stubs: Default::default(),
             modules: Default::default(),
             pristine: None,
+            writes,
             function_names: ws.function_names().clone(),
             callee_cleanup: ws.callee_cleanup().clone(),
             thunks: ws
@@ -477,7 +504,7 @@ impl Emulator {
     pub fn snapshot(&mut self) -> Snapshot {
         let t = std::time::Instant::now();
         self.stats.snapshots += 1;
-        let s = Snapshot::capture(&mut self.vm.cpu, self.heap_next);
+        let s = Snapshot::capture(&mut self.vm.cpu, self.heap_next, self.writes.borrow_mut().mark());
         self.stats.snapshot_us += t.elapsed().as_micros() as u64;
         s
     }
@@ -485,6 +512,7 @@ impl Emulator {
     pub fn restore(&mut self, snapshot: &Snapshot) {
         let t = std::time::Instant::now();
         self.heap_next = snapshot.restore_into(&mut self.vm.cpu);
+        self.writes.borrow_mut().restore(snapshot.writes);
         self.last_error = 0;
         self.stats.restore_us += t.elapsed().as_micros() as u64;
     }
@@ -544,6 +572,9 @@ impl Emulator {
     }
 
     /// write memory; writes to the void are discarded.
+    // TODO(ai): these writes skip the write hooks (perm::NONE), so the write log misses
+    // what API models write, like memcpy, strcpy, and GetEnvironmentVariable, and a string
+    // copied by an API has no writers. Log them here with the current pc, the call instruction.
     pub fn write_mem(&mut self, va: VA, buf: &[u8]) -> Result<()> {
         let mut offset = 0usize;
         while offset < buf.len() {
@@ -614,8 +645,31 @@ impl Emulator {
     }
 
     /// a view of the current memory contents.
+    /// the instructions that wrote `[va, va+len)`, as of `mark`.
+    pub fn writers(&self, mark: writes::Mark, va: VA, len: usize) -> Vec<writes::Writer> {
+        self.writes.borrow().writers(mark, va, len)
+    }
+
+    /// forget the writes so far; this invalidates the marks of earlier snapshots and views.
+    pub fn clear_writes(&mut self) {
+        let mut log = self.writes.borrow_mut();
+        self.stats.write_records_max = self.stats.write_records_max.max(log.len() as u64);
+        self.stats.writes_logged += log.writes;
+        log.writes = 0;
+        log.clear();
+    }
+
+    pub fn write_mark(&mut self) -> writes::Mark {
+        self.writes.borrow_mut().mark()
+    }
+
+    pub fn write_log_len(&self) -> usize {
+        self.writes.borrow().len()
+    }
+
     pub fn memory(&mut self) -> MemoryView {
-        MemoryView::new(self.vm.cpu.mem.snapshot(), self.layout.clone())
+        let mark = self.writes.borrow_mut().mark();
+        MemoryView::new(self.vm.cpu.mem.snapshot(), self.layout.clone(), mark)
     }
 
     // --- APIs ---
@@ -731,6 +785,7 @@ impl Emulator {
     fn step_icicle(&mut self) -> std::result::Result<(), Fault> {
         let pc = self.pc();
         self.stats.instructions += 1;
+        self.writes.borrow_mut().pc = pc;
         let mut exit = self.vm.step(1);
         if let VmExit::UnhandledException((ExceptionCode::SelfModifyingCode, addr)) = exit {
             // icicle doesn't support self-modifying code: it refuses writes to code it has

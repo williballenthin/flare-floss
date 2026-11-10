@@ -35,6 +35,10 @@ pub struct StackString {
     pub original_stack_pointer: u64,
     pub offset:                 u64,
     pub frame_offset:           u64,
+    /// the instructions that wrote the bytes of the string, by address.
+    pub writers:                Vec<u64>,
+    /// the instructions that wrote there earlier, whose bytes were overwritten.
+    pub overwritten_writers:    Vec<u64>,
 }
 
 /// A stack string that's decoded by a tight loop; same shape as a stack string.
@@ -60,6 +64,12 @@ impl From<Region> for AddressType {
     }
 }
 
+/// split writers into those whose bytes remain, and those whose bytes were overwritten.
+pub fn split_writers(writers: &[crate::emu::writes::Writer]) -> (Vec<u64>, Vec<u64>) {
+    let (f, o): (Vec<&crate::emu::writes::Writer>, Vec<_>) = writers.iter().partition(|w| w.final_);
+    (f.iter().map(|w| w.pc).collect(), o.iter().map(|w| w.pc).collect())
+}
+
 /// A string written to memory by a decoding routine.
 #[derive(Debug, Clone, Serialize)]
 pub struct DecodedString {
@@ -70,6 +80,8 @@ pub struct DecodedString {
     /// the address of the call to the decoding routine.
     pub decoded_at:       u64,
     pub decoding_routine: u64,
+    pub writers:          Vec<u64>,
+    pub overwritten_writers: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

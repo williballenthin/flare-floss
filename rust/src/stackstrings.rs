@@ -15,6 +15,8 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::program::VA;
 
+use crate::emu::writes::Mark;
+
 use crate::{
     driver::{self, Control, Observer},
     emu::{snapshot::Region, CallPolicy, Emulator, ExecOptions, Flow, Insn, MemoryView},
@@ -34,6 +36,7 @@ pub struct StackContext {
     pub sp:      VA,
     pub init_sp: VA,
     pub stack:   Vec<u8>,
+    pub writes:  Mark,
 }
 
 impl StackContext {
@@ -50,6 +53,7 @@ impl StackContext {
             sp,
             init_sp,
             stack: emu.read_mem(sp, size as usize),
+            writes: emu.write_mark(),
         })
     }
 
@@ -60,10 +64,14 @@ impl StackContext {
         min_length: usize,
         exclude: &HashSet<String>,
         pointer_size: u64,
+        emu: &Emulator,
     ) -> Vec<StackString> {
         strings::extract_strings(&self.stack, min_length, exclude)
             .into_iter()
-            .map(|s| StackString {
+            .map(|s| {
+                let (writers, overwritten_writers) =
+                    crate::results::split_writers(&emu.writers(self.writes, self.sp + s.offset as u64, s.len));
+                StackString {
                 function:               fva,
                 string:                 s.string,
                 encoding:               s.encoding,
@@ -74,7 +82,9 @@ impl StackContext {
                 frame_offset:           (self.init_sp - self.sp)
                     .wrapping_sub(s.offset as u64)
                     .wrapping_sub(pointer_size),
-            })
+                writers,
+                overwritten_writers,
+            }})
             .collect()
     }
 }
@@ -83,6 +93,7 @@ impl StackContext {
 pub struct GlobalStrings {
     pub pc:      VA,
     pub strings: Vec<(VA, strings::FoundString)>,
+    pub writes:  Mark,
 }
 
 struct StackstringMonitor<'a> {
@@ -113,7 +124,7 @@ impl StackstringMonitor<'_> {
             .map(|w| (w.va, w.string))
             .collect();
         if !found.is_empty() {
-            self.globals.push(GlobalStrings { pc, strings: found });
+            self.globals.push(GlobalStrings { pc, strings: found, writes: memory.writes });
         }
     }
 }
@@ -164,6 +175,7 @@ pub fn extract_stackstrings(
     for &fva in functions {
         let mut seen = ws.referenced_strings(fva);
 
+        emu.clear_writes();
         emu.reset(fva);
         let mut monitor = StackstringMonitor {
             start:     emu.memory(),
@@ -177,7 +189,7 @@ pub fn extract_stackstrings(
         driver::explore(emu, &opts, &mut monitor);
 
         for ctx in monitor.contexts.iter() {
-            for s in ctx.strings(fva, min_length, &seen, emu.pointer_size()) {
+            for s in ctx.strings(fva, min_length, &seen, emu.pointer_size(), emu) {
                 if seen.insert(s.string.clone()) {
                     results.push(s);
                 }
@@ -187,7 +199,11 @@ pub fn extract_stackstrings(
         for g in monitor.globals.iter() {
             for (va, s) in g.strings.iter() {
                 if seen.insert(s.string.clone()) {
+                    let (writers, overwritten_writers) =
+                        crate::results::split_writers(&emu.writers(g.writes, *va, s.len));
                     globals.push(DecodedString {
+                        writers,
+                        overwritten_writers,
                         address:          *va,
                         address_type:     AddressType::Global,
                         string:           s.string.clone(),

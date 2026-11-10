@@ -41,6 +41,7 @@ pub fn extract_tightstrings(
     for (fva, loops) in functions {
         let mut seen = ws.referenced_strings(*fva);
         for tl in loops {
+            emu.clear_writes();
             emu.reset(*fva);
             let init_sp = emu.sp();
 
@@ -64,6 +65,8 @@ pub fn extract_tightstrings(
                 if !seen.insert(s.string.clone()) {
                     continue;
                 }
+                let (writers, overwritten_writers) =
+                    crate::results::split_writers(&emu.writers(after.writes, va, s.len));
                 let region = after.region(va);
                 if region == Region::Stack {
                     tight.push(TightString {
@@ -75,6 +78,8 @@ pub fn extract_tightstrings(
                         original_stack_pointer: init_sp,
                         offset:                 va.wrapping_sub(sp),
                         frame_offset:           init_sp.wrapping_sub(va).wrapping_sub(emu.pointer_size()),
+                        writers,
+                        overwritten_writers,
                     });
                 } else {
                     decoded.push(DecodedString {
@@ -84,6 +89,8 @@ pub fn extract_tightstrings(
                         encoding:         s.encoding,
                         decoded_at:       tl.start,
                         decoding_routine: *fva,
+                        writers,
+                        overwritten_writers,
                     });
                 }
             }
