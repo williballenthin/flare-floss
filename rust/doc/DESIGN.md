@@ -459,12 +459,19 @@ about half its speed on one thread. FLOSS's FLIRT signatures are left out
 ## In IDA
 
 `ida-plugin/` builds floss-rs as a plugin for IDA: a dynamic library that IDA
-loads from its plugins directory when it opens a database. It's about 100
-lines on idalib's plugin support. A type implements idalib's `IDAPlugin`, and
-the `#[plugin]` attribute generates the `PLUGIN` structure that IDA looks for
-in the library. When the user runs the plugin, it reads the `Program` from
-the open database with `backend::ida::get_program`, calls `floss::analyze`,
-and prints the strings with IDA's `msg`.
+loads from its plugins directory when it opens a database. A type implements
+idalib's `IDAPlugin`, and the `#[plugin]` attribute generates the `PLUGIN`
+structure that IDA looks for in the library. The plugin reads the `Program`
+from the open database with `backend::ida::get_program`, calls
+`floss::analyze`, and stores the strings in the database as synthetic
+strings, which IDA 9.5 shows in the Strings window and as comments in the
+listing.
+
+| | lines | |
+|---|---|---|
+| `lib.rs` | ~240 | the plugin: when to run, the database as `synth.rs` sees it, storing the strings |
+| `synth.rs` | ~400 | where each string goes: plain data in, plain data out, with its tests |
+| `sdk.rs` | ~130 | the functions of IDA's SDK that idalib doesn't have |
 
 The plugin is a workspace of its own, like the web build. idalib's `plugin`
 feature changes idalib from a library that hosts IDA to one that IDA hosts,
@@ -473,23 +480,116 @@ once for a workspace, with one set of features, so the plugin can't share a
 workspace with the command line. It depends on floss-rs with the feature
 `ida-database` and no other backend.
 
+### When it runs
+
+The plugin runs by itself, once for a database. IDA loads it when the
+database opens, and each time the plugin gives IDA the name of its provider,
+"FLOSS", because IDA keeps a provider's strings in the database, but not its
+name. For a new file, the analysis isn't complete yet, so the plugin hooks
+the database events and runs at `auto_empty_finally`, which IDA sends when
+the analysis queue first empties. IDA doesn't send that event for an existing
+database, where the analysis is complete when the plugin loads, so there it
+runs at once. After a run, the plugin makes the netnode `$ floss`, and it
+doesn't run by itself in a database that has the netnode: the strings are
+there already. The menu entry extracts them again and replaces them.
+
 IDA calls the plugin on its main thread. That thread reads the database and
 then emulates, with helper threads on larger programs, as in the command
-line. IDA waits, and the user gets it back when the strings are printed.
+line. IDA waits, and the user gets it back when the strings are stored.
 floss-rs's log messages go to the output window. They can come from a helper
 thread, which IDA's `msg` allows. A panic that unwinds out of Rust code into
 IDA ends the process, so the plugin catches a panic of the analysis and
 reports it as an error in the output window.
 
+### Synthetic strings
+
+A synthetic string is a text at an address, from a provider, with two lists
+of addresses: its `uses` and its `parts`. IDA shows it in the Strings window
+at its address. In the listing, a string without uses is a comment at its
+address, and a string with uses is a comment at each use and not at its
+address, unless the address is an instruction among the uses. The comment is
+on a line of its own when the instruction has a comment already. A
+repeatable string shows where its address is referred to, like a repeatable
+comment, but only on lines without a comment of their own, and that excludes
+the lines where IDA names the argument of an API call. IDA doesn't show
+`parts`. Of the strings of one provider at one address, the listing shows the
+first, and the address holds about 1KB of them.
+
+`synth.rs` turns the results into such strings. It needs four things from
+the database: the function that an address is in, whether an address is in
+the program, the instructions with a data reference to an address, and
+whether a text is a static string of the program. The
+`writers` of a string become its `parts`, and its `readers` and `passed_to`
+become its `uses`. Where the string goes depends on what it is:
+
+  - **A string in global memory that holds this text only** is at that
+    memory. Its uses are also the instructions that refer to the memory, less
+    those that wrote it. IDA's references find the consumers on the paths
+    that the emulator didn't take, and the comment is there next to IDA's
+    own. Without any use, the string is repeatable.
+  - **A string that a function builds itself** (a stack string, a tight
+    string, a decoded string whose `decoded_at` is in its routine, a global
+    buffer that holds several texts in turn) is at the first of its writers
+    in the function that no other text has, then at the instruction where the
+    analysis found it, then at the start of the function. Writers outside the
+    function don't count: a helper that copies each string would collect all
+    of them.
+  - **A string that a routine returns** (`decoded_at` is a call in another
+    function) is at the call, with the call as its use, so that the comment
+    is there.
+
+A function has each text once. floss-rs can report a text several times: as
+a stack string and as a decoded string, or from several calls. The later
+ones add their uses and parts to the first. A routine that builds a string
+and consumes it itself is also reported from each call to it, with uses
+inside the routine. Those aren't strings of the callers, so they go to the
+string in the routine. When the routine has no such string, and no other
+string has the text, the string stays at the call.
+
+A decoded string whose text is a static string of the program isn't stored.
+The static strings are those that floss-rs finds in the bytes of the
+segments, as the plugin reads them from the database, and the texts must be
+equal. This is for the candidates beyond the top of the ranking, which
+floss-rs emulates while the time budget lasts: in a large program most of
+them copy or format plain strings, and every copy is a decoded string. In
+one 9.6MB program, about 49,500 of 59,000 decoded strings are such copies. The
+filter can't tell a copy from a decoded string that is also in the file, so
+it drops, for example, a decoded `kernel32.dll` when the import table has
+that name. Stack strings and tight strings aren't filtered: their function
+builds them from immediates, so they aren't copies. What the filter leaves
+is not all meaningful: in the same program, four calls return about 1,500
+short fragments each, from code bytes that the program copies to the heap.
+
+IDA takes at most about 1KB for an address, and counts the relations too. So
+the plugin stores the strings of an address with fewer and fewer relations
+until IDA accepts them, and then finds the longest run of the strings, from
+the first, that fits. It reports how many strings it left out. That happens
+at a call that decodes hundreds of strings, which is common in large
+programs, where the candidates beyond the top of the ranking decode many
+strings that the file also has in plain form.
+
+### The SDK
+
+idalib has no bindings for synthetic strings, database events, or netnodes,
+so `sdk.rs` declares the few functions of `libida` that the plugin calls,
+with the layouts of `qvector` and `synth_string_t` (88 bytes) from the SDK's
+headers. The functions are C exports, so there's no C++ to build.
+
 The library links to `libida` and `libidalib`, as idalib does, and finds them
 next to the IDA program that loads it.
 
-The tests (`ida-plugin/tests`) run the plugin where it runs for users. Each
-starts `idat` on a copy of a test program, with an IDC script that waits for
-the analysis, runs the plugin, and exits. The test then reads what the plugin
-printed from IDA's log file. Cargo builds a library for a package's tests
-only when the tests can link to it, so the library is also an `rlib`, which
-nothing uses.
+### Tests
+
+`synth.rs` has unit tests, with a few lines of data in place of a database.
+The tests in `ida-plugin/tests` run the plugin where it runs for users. Each
+starts `idat` on a copy of a test program, with a user directory that has the
+plugin in `plugins/`, so IDA loads and runs it as it does for a user. An
+IDAPython script waits for the analysis, prints the synthetic strings of the
+database and the listing at their uses, and exits; the test reads that from
+IDA's log file. One test opens the saved database again, and checks that the
+strings are there and that the plugin didn't run. Cargo builds a library for
+a package's tests only when the tests can link to it, so the library is also
+an `rlib`, which nothing uses.
 
 ## Choices, and what they cost
 

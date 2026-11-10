@@ -80,22 +80,49 @@ That's a 28MB file, about 10% slower than the glibc build.
 ### In IDA
 
 `ida-plugin/` is floss-rs as a plugin for IDA Pro 9.5, a native library written
-in Rust. Edit > Plugins > FLOSS extracts the stack strings, tight strings, and
-decoded strings of the open database, and prints them to the output window:
+in Rust. When IDA finishes the analysis of a file, the plugin extracts the
+stack strings, tight strings, and decoded strings, and stores them in the
+database as synthetic strings of the provider "FLOSS". IDA shows a synthetic
+string in the Strings window, and as a comment in the listing:
+
+```
+.text:0000000140001079   lea     rcx, OutputString  ; lpOutputString
+.text:0000000140001079                              ; "C:\\malware.exe"
+.text:0000000140001080   call    cs:OutputDebugStringA ; kernel32
+.text:0000000140001080                              ; "C:\\malware.exe"
+```
+
+Each string has one address, where the Strings window goes, and the comment is
+at its uses: the instructions that read the string, and the calls that take a
+pointer to it.
+
+| the string | its address | its uses |
+|---|---|---|
+| in global memory that holds this text only | the memory | the instructions that refer to the memory, read it, or pass it to a call |
+| built by the function that uses it: a stack string, a tight string, a buffer that's decoded in place | the first instruction of the function that wrote it | the instructions that read it or pass it to a call |
+| returned by a decoding routine, on the heap, the caller's stack, or a buffer that holds other texts too | the call to the routine | the call |
+
+A function has each text once, and a string that a routine builds and consumes
+itself is at the routine, rather than at each call to it. A string without
+uses has its comment at its address. In global memory that comment is
+repeatable, so IDA shows it wherever the address is referred to.
+
+A decoded string that the program also has as a static string isn't stored.
+Most of these are copies: a routine that copies or formats plain strings
+"decodes" each of them, and in a large program they outnumber the obfuscated
+strings many times. The cost is a decoded string that happens to be in the
+file too, like the name of a DLL that the import table also has. Stack
+strings and tight strings are stored whatever their text.
+
+IDA saves the strings with the database, so the plugin runs once for a
+database. Edit > Plugins > FLOSS extracts the strings again, and replaces
+them. The output window has a summary:
 
 ```
 FLOSS: extracting obfuscated strings
-FLOSS STACK STRINGS (1)
-0x140001064: kernel32.dll
-FLOSS TIGHT STRINGS (0)
-FLOSS DECODED STRINGS (1)
-0x140001000: kernel32.dll
-FLOSS: finished in 0.07s
+FLOSS: 1 stack strings, 0 tight strings, and 1 decoded strings, as 1 synthetic strings in the Strings window, in 0.07s
+FLOSS: 1 of the decoded strings are static strings of the program too, and aren't among them
 ```
-
-A double click on an address goes there. For a stack string or a tight string,
-it's the instruction where floss-rs found the string. For a decoded string,
-it's the call to the decoding routine.
 
 ```
 cd ida-plugin
@@ -109,8 +136,13 @@ IDA as the floss-rs build does.
 
 The plugin reads the program from the database, like the IDA backend, so it
 works from the functions and names that the user has there. It runs with the
-default options, and IDA waits until it finishes. It doesn't print static
+default options, and IDA waits until it finishes. It doesn't extract static
 strings, which IDA's Strings window has. The database is x86 or x64.
+
+IDA keeps about 1KB of synthetic strings for one address. Where a call
+decodes more than that, the plugin stores the strings that fit, and reports
+the number of the others in the output window. The uses come from the paths
+that floss-rs emulates, so a use that only other paths reach is missing.
 
 ### In a browser
 
@@ -206,5 +238,6 @@ cargo test --release --test lancelot                  # end to end, with lancelo
 The end-to-end tests are in `tests/common`, and run once with each backend.
 IDA only works on the main thread, so `tests/test_ida.rs` runs its tests there,
 one at a time, with [libtest-mimic](https://github.com/LukasKalbertodt/libtest-mimic).
-The plugin's tests start `idat`, the text-mode IDA, on a test program, run the
-plugin there, and read the strings from IDA's log.
+The plugin's tests start `idat`, the text-mode IDA, on a test program, with the
+plugin among IDA's plugins, and read the synthetic strings of the database and
+the listing at their uses from IDA's log. They need IDAPython.
