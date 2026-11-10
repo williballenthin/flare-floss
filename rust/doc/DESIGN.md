@@ -549,18 +549,21 @@ string in the routine. When the routine has no such string, and no other
 string has the text, the string stays at the call.
 
 A decoded string whose text is a static string of the program isn't stored.
-The static strings are those that floss-rs finds in the bytes of the
-segments, as the plugin reads them from the database, and the texts must be
-equal. This is for the candidates beyond the top of the ranking, which
+The static strings are those in the bytes of the segments, as the plugin
+reads them from the database. They get the same clean-up as the strings that
+the analyses find (`strings::extract_strings`), which removes junk characters
+from short strings: a copy of the bytes `u%jdX` is the decoded string `ujdX`,
+so that is the text to compare with. The texts must be equal, in either
+encoding. This is for the candidates beyond the top of the ranking, which
 floss-rs emulates while the time budget lasts: in a large program most of
 them copy or format plain strings, and every copy is a decoded string. In
-one 9.6MB program, about 49,500 of 59,000 decoded strings are such copies. The
-filter can't tell a copy from a decoded string that is also in the file, so
-it drops, for example, a decoded `kernel32.dll` when the import table has
-that name. Stack strings and tight strings aren't filtered: their function
-builds them from immediates, so they aren't copies. What the filter leaves
-is not all meaningful: in the same program, four calls return about 1,500
-short fragments each, from code bytes that the program copies to the heap.
+one 9.6MB program, about 56,400 of 59,000 decoded strings are such copies,
+and four calls each copy 4MB to 5MB of the program's image to the heap with
+one instruction. The filter can't tell a copy from a decoded string that is
+also in the file, so it drops, for example, a decoded `kernel32.dll` when
+the import table has that name. A copy of one part of a static string stays,
+since the texts differ. Stack strings and tight strings aren't filtered:
+their function builds them from immediates, so they aren't copies.
 
 IDA takes at most about 1KB for an address, and counts the relations too. So
 the plugin stores the strings of an address with fewer and fewer relations

@@ -28,6 +28,8 @@
 //! A decoded string whose text the program also has as a static string isn't a synthetic
 //! string. Mostly the routine copied it from there, and the Strings window has the
 //! original. Stack strings and tight strings stay, since their function builds them.
+//! The analyses remove junk characters from the strings that they find, so the static
+//! strings to compare with are `get_static_texts`, which removes the same.
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use floss::results::{AddressType, DecodedString, Strings};
@@ -162,6 +164,12 @@ impl Placed {
             }),
         }
     }
+}
+
+/// The texts of the strings in `bytes`, as an analysis reports a string with the same bytes.
+pub fn get_static_texts(bytes: &[u8], min_length: usize) -> impl Iterator<Item = String> {
+    let strings = floss::strings::extract_strings(bytes, min_length, &HashSet::new());
+    strings.into_iter().map(|s| s.string)
 }
 
 #[cfg(test)]
@@ -396,5 +404,11 @@ mod tests {
         let synth = get_synthetic_strings(&strings, &db);
         assert_eq!(texts(&synth), vec![(0x1004, "kernel32.dll"), (0x1050, "decoded text")]);
         assert_eq!(synth[&0x1004][0].uses, vec![0x1064], "the stack string, which its function builds, stays as it is");
+    }
+
+    #[test]
+    fn static_texts_are_what_a_copy_of_the_bytes_is_reported_as() {
+        let texts: Vec<String> = get_static_texts(b"\x01u%jdX\x89kernel32.dll\x00j$Y\x00", 4).collect();
+        assert_eq!(texts, ["ujdX", "kernel32.dll"]);
     }
 }

@@ -65,8 +65,8 @@ fn to_ida_error(e: impl std::fmt::Display) -> IDAError {
 fn extract_strings(idb: &IDB) -> Result<(ResultDocument, HashSet<String>), IDAError> {
     let opts = floss::Options::default();
     let program = floss::backend::ida::get_program(idb).map_err(to_ida_error)?;
-    let static_strings = program.segments.iter().flat_map(|s| floss::extract_static_strings(&s.bytes, opts.min_length));
-    let static_strings = static_strings.map(|s| s.string).collect();
+    let static_strings = program.segments.iter().flat_map(|s| synth::get_static_texts(&s.bytes, opts.min_length));
+    let static_strings = static_strings.collect();
     Ok((floss::analyze(program, &opts).map_err(to_ida_error)?, static_strings))
 }
 
