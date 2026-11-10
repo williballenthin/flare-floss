@@ -56,7 +56,7 @@ memory, and a rule for which strings to report.
 | `emu/insn.rs` | ~100 | instruction classification: control flow, `rep`, `mov` to memory |
 | `emu/api.rs` | ~420 | API models (malloc, memcpy, GetProcAddress, ...) and calling conventions |
 | `emu/snapshot.rs` | ~260 | snapshots of emulator state, and memory diffs |
-| `emu/writes.rs` | ~220 | the write log: which instructions wrote which memory, on each path |
+| `emu/access.rs` | ~380 | the access log: which instructions wrote and read which memory, and which calls took pointers to it, on each path |
 | `emu/sleigh.rs` | ~190 | the embedded SLEIGH specs, and icicle VMs built from them |
 | `driver.rs` | ~230 | strategies: explore every path, explore to an address, run to an address |
 | `strings.rs` | ~310 | finding strings in bytes, FLOSS's junk filters |
@@ -248,29 +248,60 @@ views, by region (stack, global, heap). With a previous view, it only reports
 runs that touch pages written since, so diffing many views of one emulation
 is incremental.
 
-### Which instructions wrote a string
+### Which instructions wrote and used a string
 
 Each string in the results has `writers`, the instructions whose bytes are
 still in the string, and `overwritten_writers`, the instructions that wrote
 there before them, like the first loop of a buffer that is decoded in place.
+It also has its uses: `readers`, the instructions that read the finished
+string, and `passed_to`, the calls that took a pointer into it as an argument.
+All four are lists of instruction addresses, in order. The IDA plugin puts
+the strings in the listing with them (see [In IDA](#in-ida)).
 
-A write hook on the image, stack, and heap appends a record (instruction,
-start, length) to the write log in `emu/writes.rs`. Each record points at the
-record before it on the same path. Because `explore` forks the state at each
-branch, the records form a tree, and a snapshot or memory view keeps only a
-`Mark`, the index of the newest record on its path. Restoring a snapshot moves
-the tail back to its mark. To find the writers of a string, the log walks back
-from the view's mark and subtracts each record's range from the bytes that no
-later record covers. Consecutive writes by one instruction to adjacent bytes
-extend one record, so a decoding loop or `rep stosb` costs one record.
+Hooks on the image, stack, and heap append a record (instruction, kind,
+start, length) to the access log in `emu/access.rs` for each write and read.
+Each record points at the record before it on the same path. Because
+`explore` forks the state at each branch, the records form a tree, and a
+snapshot or memory view keeps only a `Mark`, the index of the newest record
+on its path. Restoring a snapshot moves the tail back to its mark.
+Consecutive accesses by one instruction to adjacent bytes extend one record,
+so a decoding loop or `rep stosb` costs one record. An API model writes
+memory as the call that reached it, so the call is a writer of a string that
+`memcpy` copies.
+
+To find the writers of a string, the log walks back from the view's mark and
+subtracts each record's range from the bytes that no later record covers.
+
+To find the uses, it walks back to the last write to the string, which is
+where its contents are complete, and then follows every path that continues
+from that record, each up to its next write to the string. So the uses
+include what happens after the checkpoint where the analysis found the
+string, on each path that `explore` took from there. The stack string and
+tight string analyses ask for the uses when the function is explored. A
+decoding routine runs to its return, so the uses of a decoded string are
+those inside the routine: what the caller does with the string afterwards
+isn't among them, and a consumer of that string derives it from `decoded_at`,
+the call.
+
+A call takes a string when one of its arguments points into it. The emulator
+doesn't know the signature of the function, so it takes the arguments that
+the caller set: the log has a record for each instruction that writes an
+argument register, and at a call the emulator reads the registers and the
+stack slots that were written since the call before. That tells an argument
+from a value that an earlier call left behind. On x86 only stack slots count,
+so a pointer in `ecx` for a `thiscall` or `fastcall` function isn't found.
+
+A string that only one arm of a branch builds has no uses after the arms
+join: `explore` visits the code after the join once, on the path that got
+there first, and the other paths end.
 
 The analyses clear the log before each function, so marks from an earlier
-function are not valid. The log keeps at most 4M records. Writes by API
-models, like memcpy, go through `write_mem`, which the hooks don't see, so a
-string that an API copies has no writers.
+function are not valid. The log keeps at most 4M records. A read hook puts
+icicle on its slow path for memory accesses, so reads are logged only while
+an analysis collects uses (`track_uses`).
 
-On the test programs, the log costs 3 to 6% of decoding time, and the largest
-log holds about 30k records.
+On five larger programs, with one thread, the uses add 5% to the time for
+stack strings, 22% for tight strings, and 4% for decoded strings.
 
 ### Self-modifying code
 
@@ -317,6 +348,8 @@ A tight loop is a loop of one or two blocks that writes memory and doesn't call
 anything (`features::find_tight_loops`). For each: `explore_to` the loop, snapshot
 memory, `run_to` the block after the loop, and report the strings that the loop
 wrote: on the stack these are tight strings; elsewhere they're decoded strings.
+When the loop wrote a new string, `explore` the rest of the function from
+there, which is what finds the uses of the string.
 
 ### Decoded strings (`decoded.rs`)
 

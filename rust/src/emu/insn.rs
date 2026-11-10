@@ -35,6 +35,8 @@ pub struct Insn {
     /// like `mov [ebp-0x10], eax` or `movdqa [esp+0x20], xmm0`, or a string move like `movsb`.
     /// this is FLOSS's signal that a block might be constructing a stack string.
     pub is_mov_to_memory: bool,
+    /// the x64 argument registers that the instruction writes: bits 0 to 3 for rcx, rdx, r8, r9.
+    pub args_written: u8,
 }
 
 impl Insn {
@@ -46,6 +48,7 @@ impl Insn {
             flow: Flow::Api,
             rep: false,
             is_mov_to_memory: false,
+            args_written: 0,
         }
     }
 
@@ -102,6 +105,7 @@ impl Insn {
             flow,
             rep,
             is_mov_to_memory: is_mov_to_memory(&insn),
+            args_written: args_written(&insn),
         })
     }
 }
@@ -128,4 +132,26 @@ fn is_mov_to_memory(insn: &dis::Instruction) -> bool {
             _ => false,
         },
     }
+}
+
+/// see `Insn::args_written`.
+fn args_written(insn: &dis::Instruction) -> u8 {
+    use zydis::Register as R;
+    let mut mask = 0;
+    for op in insn.operands() {
+        let DecodedOperandKind::Reg(reg) = op.kind else {
+            continue;
+        };
+        if !op.action.intersects(zydis::OperandAction::MASK_WRITE) {
+            continue;
+        }
+        mask |= match reg.largest_enclosing(zydis::MachineMode::LONG_64) {
+            R::RCX => 1,
+            R::RDX => 2,
+            R::R8 => 4,
+            R::R9 => 8,
+            _ => 0,
+        };
+    }
+    mask
 }

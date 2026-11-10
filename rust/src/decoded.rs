@@ -291,7 +291,8 @@ fn decode_routine(ws: &Workspace, emu: &mut Emulator, routine: VA, min_length: u
     let mut seen: HashSet<String> = ws.referenced_strings(routine);
     // the decoded part of each string reported so far, and where it is.
     let mut seen_changed: HashSet<(VA, String)> = HashSet::new();
-    emu.clear_writes();
+    emu.clear_log();
+    emu.track_uses(true);
     let contexts = extract_call_contexts(ws, emu, routine);
     let n_calls = contexts.len();
     log::debug!("decoded: routine {routine:#x}: {n_calls} calls");
@@ -306,7 +307,7 @@ fn decode_routine(ws: &Workspace, emu: &mut Emulator, routine: VA, min_length: u
         // the strings in each view, by address. a string that grows from one view
         // to the next, like one decoded a character at a time with an API call for each,
         // is reported once, as it is at the end.
-        let mut found: Vec<(strings::Written, crate::emu::writes::Mark)> = vec![];
+        let mut found: Vec<(strings::Written, crate::emu::access::Mark)> = vec![];
         // the index in `found` of the latest string at each address.
         let mut latest: HashMap<VA, usize> = HashMap::new();
         for (i, after) in afters.iter().enumerate() {
@@ -320,11 +321,11 @@ fn decode_routine(ws: &Workspace, emu: &mut Emulator, routine: VA, min_length: u
                         if found[i].0.string.encoding == w.string.encoding
                             && w.string.string.starts_with(&found[i].0.string.string) =>
                     {
-                        found[i] = (w, after.writes);
+                        found[i] = (w, after.mark);
                     }
                     _ => {
                         latest.insert(w.va, found.len());
-                        found.push((w, after.writes));
+                        found.push((w, after.mark));
                     }
                 }
             }
@@ -339,9 +340,12 @@ fn decode_routine(ws: &Workspace, emu: &mut Emulator, routine: VA, min_length: u
             }
             seen.insert(w.string.string.clone());
             let (writers, overwritten_writers) = crate::results::split_writers(&emu.writers(mark, w.va, w.string.len));
+            let uses = emu.uses(mark, w.va, w.string.len);
             results.push(DecodedString {
                 writers,
                 overwritten_writers,
+                readers: uses.readers,
+                passed_to: uses.passed_to,
                 address: w.va,
                 address_type: AddressType::from(before.region(w.va)),
                 string: w.string.string,

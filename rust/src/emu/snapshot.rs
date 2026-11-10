@@ -27,11 +27,11 @@ pub struct Snapshot {
     mem:       mem::Snapshot,
     /// the emulator's heap allocator state.
     heap_next: VA,
-    pub(super) writes: super::writes::Mark,
+    pub(super) mark: super::access::Mark,
 }
 
 impl Snapshot {
-    pub(super) fn capture(cpu: &mut Cpu, heap_next: VA, writes: super::writes::Mark) -> Snapshot {
+    pub(super) fn capture(cpu: &mut Cpu, heap_next: VA, mark: super::access::Mark) -> Snapshot {
         let n = cpu.arch.sleigh.num_registers();
         let mut regs = Vec::with_capacity(n * REGISTER_SLOT_SIZE as usize);
         for id in 0..n {
@@ -46,7 +46,7 @@ impl Snapshot {
             regs: regs.into_boxed_slice(),
             mem: cpu.mem.snapshot(),
             heap_next,
-            writes,
+            mark,
         }
     }
 
@@ -67,7 +67,7 @@ impl Snapshot {
     }
 
     pub fn memory(&self, layout: &Layout) -> MemoryView {
-        MemoryView::new(self.mem.clone(), layout.clone(), self.writes)
+        MemoryView::new(self.mem.clone(), layout.clone(), self.mark)
     }
 }
 
@@ -107,13 +107,13 @@ fn page_bytes<'a>(page: &Page<'a>) -> &'a [u8; physical::PAGE_SIZE] {
 pub struct MemoryView {
     mem:    mem::Snapshot,
     layout: Layout,
-    /// the newest write in this memory, see `Emulator::writers`.
-    pub writes: super::writes::Mark,
+    /// the newest access log record as of this memory, see `Emulator::writers`.
+    pub mark: super::access::Mark,
 }
 
 impl MemoryView {
-    pub(super) fn new(mem: mem::Snapshot, layout: Layout, writes: super::writes::Mark) -> MemoryView {
-        MemoryView { mem, layout, writes }
+    pub(super) fn new(mem: mem::Snapshot, layout: Layout, mark: super::access::Mark) -> MemoryView {
+        MemoryView { mem, layout, mark }
     }
 
     pub fn region(&self, va: VA) -> Region {

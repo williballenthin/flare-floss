@@ -32,11 +32,11 @@ use crate::{
     workspace::Workspace,
 };
 
+pub mod access;
 pub mod api;
 pub mod insn;
 pub mod sleigh;
 pub mod snapshot;
-pub mod writes;
 mod x86;
 
 pub use insn::{Flow, Insn};
@@ -56,6 +56,8 @@ const STACK_HEADROOM: u64 = 0x40000;
 pub const MAX_ALLOCATION: u64 = 5 * 1024 * 1024;
 /// spacing between import stubs.
 const STUB_SIZE: u64 = 0x10;
+/// the most stack slots to consider as the arguments of a call.
+const MAX_STACK_ARGS: u64 = 8;
 
 /// Where things live in the emulated address space.
 #[derive(Debug, Clone)]
@@ -107,6 +109,15 @@ impl Layout {
 
     pub fn is_image(&self, va: VA) -> bool {
         self.image.iter().any(|r| r.contains(&va))
+    }
+
+    /// the memory whose accesses are logged: the image, stack, and heap.
+    fn logged(&self) -> Vec<std::ops::Range<VA>> {
+        self.image
+            .iter()
+            .cloned()
+            .chain([self.stack.clone(), self.heap.clone()])
+            .collect()
     }
 }
 
@@ -337,7 +348,7 @@ pub struct Stats {
     pub code_flushes:  u64,
     pub snapshot_us:   u64,
     pub restore_us:    u64,
-    /// the most write log records at once, and the writes they stand for.
+    /// the most access log records at once, and the writes they stand for.
     pub write_records_max: u64,
     pub writes_logged: u64,
     /// instructions icicle couldn't emulate, by reason and mnemonic.
@@ -384,8 +395,10 @@ pub struct Emulator {
     callee_cleanup:  BTreeMap<VA, u16>,
     /// functions that just jump to another function, like `jmp [__imp_malloc]`.
     thunks:          BTreeSet<VA>,
-    /// which instructions wrote which memory, filled in by a write hook.
-    writes:          writes::SharedWriteLog,
+    /// which instructions wrote and read which memory, filled in by memory hooks.
+    log:             access::SharedAccessLog,
+    /// the read hooks, while uses are tracked.
+    read_hooks:      Vec<u32>,
 }
 
 impl Emulator {
@@ -418,20 +431,14 @@ impl Emulator {
 
         x86::install(&mut vm);
 
-        let writes: writes::SharedWriteLog = std::rc::Rc::new(std::cell::RefCell::new(writes::WriteLog::new()));
-        let ranges: Vec<std::ops::Range<VA>> = layout
-            .image
-            .iter()
-            .cloned()
-            .chain([layout.stack.clone(), layout.heap.clone()])
-            .collect();
-        for r in ranges {
-            let log = writes.clone();
+        let log: access::SharedAccessLog = std::rc::Rc::new(std::cell::RefCell::new(access::AccessLog::new()));
+        for r in layout.logged() {
+            let log = log.clone();
             vm.cpu.mem.add_write_hook(
                 r.start,
                 r.end,
                 Box::new(move |_: &mut icicle_vm::cpu::Mmu, addr: u64, value: &[u8]| {
-                    log.borrow_mut().record(addr, value.len());
+                    log.borrow_mut().write(addr, value.len());
                 }),
             );
         }
@@ -453,7 +460,8 @@ impl Emulator {
             stubs: Default::default(),
             modules: Default::default(),
             pristine: None,
-            writes,
+            log,
+            read_hooks: vec![],
             function_names: ws.function_names().clone(),
             callee_cleanup: ws.callee_cleanup().clone(),
             thunks: ws
@@ -472,6 +480,7 @@ impl Emulator {
             emu.write_ptr(import.va, addr)?;
         }
 
+        emu.log.borrow_mut().clear();
         emu.pristine = Some(emu.snapshot());
         Ok(emu)
     }
@@ -497,14 +506,15 @@ impl Emulator {
         let ret = self.layout.modules.end - PAGE_SIZE;
         let sp = self.sp() - self.pointer_size();
         self.set_sp(sp);
-        let _ = self.write_ptr(sp, ret);
+        let size = self.pointer_size() as usize;
+        let _ = self.write_bytes(sp, &ret.to_le_bytes()[..size], false);
         ret
     }
 
     pub fn snapshot(&mut self) -> Snapshot {
         let t = std::time::Instant::now();
         self.stats.snapshots += 1;
-        let s = Snapshot::capture(&mut self.vm.cpu, self.heap_next, self.writes.borrow_mut().mark());
+        let s = Snapshot::capture(&mut self.vm.cpu, self.heap_next, self.log.borrow_mut().mark());
         self.stats.snapshot_us += t.elapsed().as_micros() as u64;
         s
     }
@@ -512,7 +522,7 @@ impl Emulator {
     pub fn restore(&mut self, snapshot: &Snapshot) {
         let t = std::time::Instant::now();
         self.heap_next = snapshot.restore_into(&mut self.vm.cpu);
-        self.writes.borrow_mut().restore(snapshot.writes);
+        self.log.borrow_mut().restore(snapshot.mark);
         self.last_error = 0;
         self.stats.restore_us += t.elapsed().as_micros() as u64;
     }
@@ -571,11 +581,13 @@ impl Emulator {
         buf
     }
 
-    /// write memory; writes to the void are discarded.
-    // TODO(ai): these writes skip the write hooks (perm::NONE), so the write log misses
-    // what API models write, like memcpy, strcpy, and GetEnvironmentVariable, and a string
-    // copied by an API has no writers. Log them here with the current pc, the call instruction.
+    /// write memory, as the instruction that is executing: for an API model, the call.
+    /// writes to the void are discarded.
     pub fn write_mem(&mut self, va: VA, buf: &[u8]) -> Result<()> {
+        self.write_bytes(va, buf, true)
+    }
+
+    fn write_bytes(&mut self, va: VA, buf: &[u8], log: bool) -> Result<()> {
         let mut offset = 0usize;
         while offset < buf.len() {
             let addr = va.wrapping_add(offset as u64);
@@ -589,6 +601,9 @@ impl Emulator {
                 .mem
                 .write_bytes(addr, &buf[offset..offset + chunk], perm::NONE)
                 .map_err(|e| anyhow!("write to {addr:#x}: {e:?}"))?;
+            if log {
+                self.log.borrow_mut().write(addr, chunk);
+            }
             offset += chunk;
         }
         Ok(())
@@ -644,31 +659,80 @@ impl Emulator {
         Ok(va)
     }
 
-    /// a view of the current memory contents.
     /// the instructions that wrote `[va, va+len)`, as of `mark`.
-    pub fn writers(&self, mark: writes::Mark, va: VA, len: usize) -> Vec<writes::Writer> {
-        self.writes.borrow().writers(mark, va, len)
+    pub fn writers(&self, mark: access::Mark, va: VA, len: usize) -> Vec<access::Writer> {
+        self.log.borrow().writers(mark, va, len)
     }
 
-    /// forget the writes so far; this invalidates the marks of earlier snapshots and views.
-    pub fn clear_writes(&mut self) {
-        let mut log = self.writes.borrow_mut();
+    /// the instructions that used `[va, va+len)` as it was at `mark`; see `track_uses`.
+    pub fn uses(&self, mark: access::Mark, va: VA, len: usize) -> access::Uses {
+        self.log.borrow().uses(mark, va, len)
+    }
+
+    /// Log the reads of memory and the pointers passed to calls, too, or stop doing so.
+    ///
+    /// icicle takes its slow path for memory that has a read hook,
+    /// so this is on only where the uses of strings are collected.
+    pub fn track_uses(&mut self, on: bool) {
+        if on && !self.read_hooks.is_empty() {
+            return;
+        }
+        for id in self.read_hooks.drain(..) {
+            self.vm.cpu.mem.remove_read_hook(id);
+        }
+        if !on {
+            return;
+        }
+        for r in self.layout.logged() {
+            let log = self.log.clone();
+            let hook = move |_: &mut icicle_vm::cpu::Mmu, addr: u64, size: u8| -> Option<u64> {
+                log.borrow_mut().read(addr, size as usize);
+                None
+            };
+            self.read_hooks.extend(self.vm.cpu.mem.add_read_hook(r.start, r.end, Box::new(hook)));
+        }
+    }
+
+    /// Log the call that the instruction at `pc` just made, and the pointers it passes:
+    /// the values of the argument registers and stack slots that were set since
+    /// the previous call, which is what tells an argument from a leftover.
+    fn log_call(&mut self, pc: VA) {
+        let (regs, written) = self.log.borrow().since_call();
+        let mut args = vec![];
+        for (i, &reg) in self.regs.args.iter().enumerate() {
+            if regs & (1 << i) != 0 {
+                args.push(self.vm.cpu.read_reg(reg));
+            }
+        }
+        // the slots after the return address and, on x64, the shadow space.
+        let size = self.pointer_size();
+        let first = self.sp() + size * (1 + self.regs.args.len() as u64);
+        for slot in (0..MAX_STACK_ARGS).map(|i| first + size * i) {
+            if !written.iter().any(|&(start, end)| start < slot + size && slot < end) {
+                break;
+            }
+            args.push(self.read_ptr(slot));
+        }
+        args.retain(|&arg| !self.in_void(arg));
+        self.log.borrow_mut().call(pc, &args);
+    }
+
+    /// forget the accesses so far; this invalidates the marks of earlier snapshots and views.
+    pub fn clear_log(&mut self) {
+        let mut log = self.log.borrow_mut();
         self.stats.write_records_max = self.stats.write_records_max.max(log.len() as u64);
         self.stats.writes_logged += log.writes;
         log.writes = 0;
         log.clear();
     }
 
-    pub fn write_mark(&mut self) -> writes::Mark {
-        self.writes.borrow_mut().mark()
+    pub fn log_mark(&mut self) -> access::Mark {
+        self.log.borrow_mut().mark()
     }
 
-    pub fn write_log_len(&self) -> usize {
-        self.writes.borrow().len()
-    }
-
+    /// a view of the current memory contents.
     pub fn memory(&mut self) -> MemoryView {
-        let mark = self.writes.borrow_mut().mark();
+        let mark = self.log.borrow_mut().mark();
         MemoryView::new(self.vm.cpu.mem.snapshot(), self.layout.clone(), mark)
     }
 
@@ -785,7 +849,7 @@ impl Emulator {
     fn step_icicle(&mut self) -> std::result::Result<(), Fault> {
         let pc = self.pc();
         self.stats.instructions += 1;
-        self.writes.borrow_mut().pc = pc;
+        self.log.borrow_mut().pc = pc;
         let mut exit = self.vm.step(1);
         if let VmExit::UnhandledException((ExceptionCode::SelfModifyingCode, addr)) = exit {
             // icicle doesn't support self-modifying code: it refuses writes to code it has
@@ -857,8 +921,16 @@ impl Emulator {
             }
         }
 
+        let track = !self.read_hooks.is_empty();
+        if track && insn.args_written != 0 && !self.regs.args.is_empty() {
+            self.log.borrow_mut().regs(insn.args_written);
+        }
+
         if insn.flow != Flow::Call {
             return Ok(Event::Executed(None));
+        }
+        if track {
+            self.log_call(pc);
         }
 
         // follow thunks, like `jmp [__imp_malloc]`, to the function they stand for.
@@ -868,6 +940,8 @@ impl Emulator {
             }
             self.step_icicle()?;
         }
+        // what an API model writes is written by the call.
+        self.log.borrow_mut().pc = pc;
 
         let target = self.pc();
         if let Some(stub) = self.stubs.get(&target) {

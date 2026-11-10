@@ -61,6 +61,15 @@ pub fn get_strings(doc: &ResultDocument) -> BTreeSet<String> {
         .collect()
 }
 
+/// the calls that `passed_to` has for the strings with this text.
+pub fn get_calls_that_take(doc: &ResultDocument, text: &str) -> BTreeSet<u64> {
+    let s = &doc.strings;
+    let stack = s.stack_strings.iter().chain(s.tight_strings.iter()).map(|s| (&s.string, &s.passed_to));
+    let decoded = s.decoded_strings.iter().map(|s| (&s.string, &s.passed_to));
+    let calls = stack.chain(decoded).filter(|(string, _)| string.contains(text));
+    calls.flat_map(|(_, calls)| calls.iter().copied()).collect()
+}
+
 fn check(doc: &ResultDocument, expected: Expected) -> Result<(), Failed> {
     match expected {
         Expected::String(expected) => {
@@ -81,6 +90,10 @@ fn check(doc: &ResultDocument, expected: Expected) -> Result<(), Failed> {
                 return Err(format!("expected one string with {expected:?}, found {at_calls:?}").into());
             }
         }
+    }
+    let (Expected::String(text) | Expected::OneDecodedAtCall(text)) = expected;
+    if get_calls_that_take(doc, text).is_empty() {
+        return Err(format!("expected a call that takes {text:?}: each program gives its string to OutputDebugString").into());
     }
     Ok(())
 }

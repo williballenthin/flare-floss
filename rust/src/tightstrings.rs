@@ -6,6 +6,8 @@
 //! This is like FLOSS's `tightstrings.py`, which looks for strings on the stack
 //! after the loop that weren't there before it. Diffing memory finds those too,
 //! plus strings the loop decodes into global memory or the heap.
+//!
+//! Then explore the rest of the function, to see which instructions use those strings.
 use crate::program::VA;
 
 use crate::{
@@ -38,10 +40,11 @@ pub fn extract_tightstrings(
 
     let mut tight = vec![];
     let mut decoded = vec![];
+    emu.track_uses(true);
     for (fva, loops) in functions {
         let mut seen = ws.referenced_strings(*fva);
         for tl in loops {
-            emu.clear_writes();
+            emu.clear_log();
             emu.reset(*fva);
             let init_sp = emu.sp();
 
@@ -59,14 +62,17 @@ pub fn extract_tightstrings(
             // the strings the loop wrote to: on the stack, these are tight strings;
             // elsewhere (which FLOSS doesn't look for), they're decoded strings.
             let changes = after.changes_since(&before, None);
-            for strings::Written { va, string: s, .. } in
-                strings::strings_touching(&before, &after, &changes, min_length, &seen)
-            {
-                if !seen.insert(s.string.clone()) {
-                    continue;
-                }
+            let mut found = strings::strings_touching(&before, &after, &changes, min_length, &seen);
+            found.retain(|w| seen.insert(w.string.string.clone()));
+            if found.is_empty() {
+                continue;
+            }
+
+            driver::explore(emu, &opts, &mut driver::Nothing);
+            for strings::Written { va, string: s, .. } in found {
                 let (writers, overwritten_writers) =
-                    crate::results::split_writers(&emu.writers(after.writes, va, s.len));
+                    crate::results::split_writers(&emu.writers(after.mark, va, s.len));
+                let uses = emu.uses(after.mark, va, s.len);
                 let region = after.region(va);
                 if region == Region::Stack {
                     tight.push(TightString {
@@ -80,6 +86,8 @@ pub fn extract_tightstrings(
                         frame_offset:           init_sp.wrapping_sub(va).wrapping_sub(emu.pointer_size()),
                         writers,
                         overwritten_writers,
+                        readers:                uses.readers,
+                        passed_to:              uses.passed_to,
                     });
                 } else {
                     decoded.push(DecodedString {
@@ -91,10 +99,13 @@ pub fn extract_tightstrings(
                         decoding_routine: *fva,
                         writers,
                         overwritten_writers,
+                        readers:          uses.readers,
+                        passed_to:        uses.passed_to,
                     });
                 }
             }
         }
     }
+    emu.track_uses(false);
     (tight, decoded)
 }
