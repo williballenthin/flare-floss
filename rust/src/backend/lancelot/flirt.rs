@@ -3,8 +3,10 @@
 use std::{borrow::Cow, path::Path};
 
 use anyhow::{Context, Result};
-use lancelot::{workspace::config::Configuration, VA};
+use lancelot::workspace::config::Configuration;
 use lancelot_flirt::{FlirtSignature, FlirtSignatureSet};
+
+use crate::program::VA;
 
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/flirt_files.rs"));

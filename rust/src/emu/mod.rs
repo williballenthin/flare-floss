@@ -6,7 +6,7 @@
 //! the code writes to memory. So the address space here is designed to
 //! keep code running rather than to be faithful:
 //!
-//!   - the image's sections are mapped read/write (and executable, when the section is),
+//!   - the program's segments are mapped read/write (and executable, when the segment is),
 //!   - there's a stack and a heap (a bump allocator used by the API models),
 //!   - every other address is backed by the `Void`: reads return `FILL_BYTE`
 //!     and writes are discarded; so wild reads and writes don't stop emulation.
@@ -25,9 +25,12 @@ use icicle_vm::cpu::{
     ExceptionCode,
 };
 use icicle_vm::VmExit;
-use lancelot::{analysis::dis::zydis, arch::Arch, aspace::AddressSpace, VA};
 
-use crate::workspace::Workspace;
+use crate::{
+    dis,
+    program::{Arch, VA},
+    workspace::Workspace,
+};
 
 pub mod api;
 pub mod insn;
@@ -254,42 +257,52 @@ impl IoMemory for Void {
     }
 }
 
-/// Map the image's sections, and return their page-aligned ranges.
+/// Map the program's segments, and return their page-aligned ranges.
 ///
-/// sections are mapped writable, even if they aren't in the program,
+/// segments are mapped writable, even if they aren't in the program,
 /// since decoders sometimes decode in place. that's more permissive than vivisect.
 fn map_image(vm: &mut icicle_vm::Vm, ws: &Workspace) -> Result<Vec<std::ops::Range<VA>>> {
-    let mut image: Vec<std::ops::Range<VA>> = vec![];
-    for section in ws.module().sections.iter() {
-        let start = section.virtual_range.start & !(PAGE_SIZE - 1);
-        let end = (section.virtual_range.end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        if start >= end {
-            continue;
+    // segments may share pages: a page is executable when any of its segments is.
+    let mut pages: BTreeMap<VA, bool> = Default::default();
+    for segment in ws.segments() {
+        let start = segment.va & !(PAGE_SIZE - 1);
+        let end = (segment.end() + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        for page in (start..end).step_by(PAGE_SIZE as usize) {
+            *pages.entry(page).or_default() |= segment.executable;
         }
-        let mut p = perm::READ | perm::WRITE | perm::INIT;
-        if section.permissions.intersects(lancelot::module::Permissions::X) {
-            p |= perm::EXEC;
-        }
-        // sections may share pages; the first mapping wins, which is fine since we copy bytes below.
-        vm.cpu.mem.map_memory_len(start, end - start, Mapping { perm: p, value: 0 });
-        image.push(start..end);
     }
 
-    for section in ws.module().sections.iter() {
-        let range = &section.virtual_range;
-        let buf = ws
-            .module()
-            .address_space
-            .read_bytes(range.start, (range.end - range.start) as usize)
-            .unwrap_or_default();
-        if !buf.is_empty() {
-            vm.cpu
-                .mem
-                .write_bytes(range.start, &buf, perm::NONE)
-                .map_err(|e| anyhow!("failed to write section {}: {e:?}", section.name))?;
+    let mut image: Vec<(std::ops::Range<VA>, bool)> = vec![];
+    for (page, executable) in pages {
+        match image.last_mut() {
+            Some((range, exec)) if range.end == page && *exec == executable => {
+                range.end += PAGE_SIZE
+            }
+            _ => image.push((page..page + PAGE_SIZE, executable)),
         }
     }
-    Ok(image)
+
+    for (range, executable) in image.iter() {
+        let mut p = perm::READ | perm::WRITE | perm::INIT;
+        if *executable {
+            p |= perm::EXEC;
+        }
+        vm.cpu.mem.map_memory_len(
+            range.start,
+            range.end - range.start,
+            Mapping { perm: p, value: 0 },
+        );
+    }
+
+    for segment in ws.segments() {
+        if !segment.bytes.is_empty() {
+            vm.cpu
+                .mem
+                .write_bytes(segment.va, &segment.bytes, perm::NONE)
+                .map_err(|e| anyhow!("failed to write segment {}: {e:?}", segment.name))?;
+        }
+    }
+    Ok(image.into_iter().map(|(range, _)| range).collect())
 }
 
 /// Back every address that isn't the image or stack with the void.
@@ -342,13 +355,12 @@ impl Stats {
 }
 
 pub struct Emulator {
-    pub stats:       Stats,
-    vm:              icicle_vm::Vm,
-    pub arch:        Arch,
-    regs:            Registers,
-    pub layout:      Layout,
-    decoder:         zydis::Decoder,
-    insns:           HashMap<VA, Option<Insn>>,
+    pub stats: Stats,
+    vm: icicle_vm::Vm,
+    pub arch: Arch,
+    regs: Registers,
+    pub layout: Layout,
+    insns: HashMap<VA, Option<Insn>>,
     /// API stubs by address; grows when GetProcAddress resolves new APIs.
     stubs:           BTreeMap<VA, Stub>,
     /// fake module handles returned by LoadLibrary et al., to DLL name.
@@ -358,8 +370,8 @@ pub struct Emulator {
     /// what GetLastError returns: set by the API models that fail on purpose.
     pub last_error:  u32,
     /// the state right after loading, before any emulation.
-    pristine:        Option<Snapshot>,
-    /// names of functions in the program (imports, exports, FLIRT matches),
+    pristine: Option<Snapshot>,
+    /// names of functions in the program (from signatures, symbols, or exports),
     /// used to recognize library functions that have API models.
     function_names:  BTreeMap<VA, String>,
     /// for x86 functions in the program: bytes of arguments the callee pops (`ret N`).
@@ -388,7 +400,6 @@ impl Emulator {
         let mut vm = sleigh::build_vm(&config)?;
 
         let regs = Registers::new(&vm, arch)?;
-        let decoder = lancelot::analysis::dis::get_disassembler(ws.module())?;
         let image = map_image(&mut vm, ws)?;
         let layout = Layout::new(image)?;
         vm.cpu.mem.map_memory_len(layout.stack.start, STACK_SIZE, Mapping {
@@ -412,20 +423,26 @@ impl Emulator {
             heap_next: layout.heap.start,
             last_error: 0,
             layout,
-            decoder,
             insns: Default::default(),
             stubs: Default::default(),
             modules: Default::default(),
             pristine: None,
-            function_names: ws.library_function_names(),
-            callee_cleanup: ws.callee_cleanup(),
-            thunks: ws.functions().map(|f| f.va).filter(|&va| ws.is_thunk(va)).collect(),
+            function_names: ws.function_names().clone(),
+            callee_cleanup: ws.callee_cleanup().clone(),
+            thunks: ws
+                .functions()
+                .map(|f| f.va)
+                .filter(|&va| ws.is_thunk(va))
+                .collect(),
         };
 
         // point each import address table entry at a stub.
-        for (slot, stub) in ws.imports() {
-            let addr = emu.add_stub(stub);
-            emu.write_ptr(slot, addr)?;
+        for import in ws.imports() {
+            let addr = emu.add_stub(Stub {
+                dll: import.dll.clone(),
+                name: import.name.clone(),
+            });
+            emu.write_ptr(import.va, addr)?;
         }
 
         emu.pristine = Some(emu.snapshot());
@@ -704,8 +721,8 @@ impl Emulator {
         if let Some(insn) = self.insns.get(&va) {
             return insn.clone();
         }
-        let buf = self.read_mem(va, 16);
-        let insn = Insn::decode(&self.decoder, va, &buf);
+        let buf = self.read_mem(va, dis::MAX_INSN_SIZE);
+        let insn = Insn::decode(self.arch, va, &buf);
         self.insns.insert(va, insn.clone());
         insn
     }

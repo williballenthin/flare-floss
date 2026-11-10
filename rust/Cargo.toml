@@ -9,6 +9,32 @@ edition = "2021"
 name = "floss-rs"
 path = "src/main.rs"
 
+# IDA only works on the main thread, so these tests have their own harness (libtest-mimic).
+[[test]]
+name = "ida"
+path = "tests/test_ida.rs"
+harness = false
+required-features = ["ida"]
+
+[[test]]
+name = "lancelot"
+path = "tests/test_lancelot.rs"
+harness = false
+required-features = ["lancelot"]
+
+[[example]]
+name = "difftest"
+required-features = ["lancelot"]
+
+# the program analysis backends, which find the functions and control flow of the program (see src/backend).
+# a build has both, and floss-rs picks one when it runs.
+#   - ida: IDA Pro, via idalib. needs an IDA installation to build, and uses one when it runs, if there is one.
+#   - lancelot: pure Rust. the only backend of builds that can't link to IDA: static binaries and WebAssembly.
+[features]
+default = ["ida", "lancelot"]
+ida = ["dep:idalib", "dep:idalib-build", "dep:tempfile", "dep:libc"]
+lancelot = ["dep:lancelot", "dep:lancelot-flirt"]
+
 [dependencies]
 anyhow = "1"
 log = "0.4"
@@ -19,9 +45,15 @@ serde_json = "1"
 regex = "1"
 smallvec = "1"
 
-# lancelot: PE loading, disassembly, control flow, FLIRT
-lancelot = { git = "https://github.com/williballenthin/lancelot", tag = "v0.10.2" }
-lancelot-flirt = { git = "https://github.com/williballenthin/lancelot", tag = "v0.10.2" }
+# zydis: instruction decoding
+zydis = { version = "4.1.1", default-features = false, features = ["std", "full-decoder", "nolibc"] }
+# idalib: IDA Pro as a library: loading, functions, control flow, FLIRT
+idalib = { version = "0.11.1", optional = true }
+tempfile = { version = "3", optional = true }
+libc = { version = "0.2", optional = true }
+# lancelot: PE loading, functions, control flow, FLIRT
+lancelot = { git = "https://github.com/williballenthin/lancelot", tag = "v0.10.2", optional = true }
+lancelot-flirt = { git = "https://github.com/williballenthin/lancelot", tag = "v0.10.2", optional = true }
 # icicle: the emulator (MIT/Apache-2.0); instruction semantics from Ghidra's SLEIGH specs
 icicle-vm = { git = "https://github.com/icicle-emu/icicle-emu", rev = "638508b72f480f9be6fe2e267ef09de8f1541f9a" }
 pcode = { git = "https://github.com/icicle-emu/icicle-emu", rev = "638508b72f480f9be6fe2e267ef09de8f1541f9a" }
@@ -35,7 +67,12 @@ target-lexicon = "0.13"
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
+[dev-dependencies]
+libtest-mimic = "0.8"
+tempfile = "3"
+
 [build-dependencies]
+idalib-build = { version = "0.11.1", optional = true }
 regex = "1"
 serde_json = "1"
 

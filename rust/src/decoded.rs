@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use lancelot::VA;
+use crate::program::VA;
 
 use crate::{
     driver::{self, Control, Limits, Observer},

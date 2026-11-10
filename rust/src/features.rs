@@ -8,13 +8,11 @@
 //! loops also get tight string extraction instead of stack string extraction.
 use std::collections::{BTreeMap, BTreeSet};
 
-use lancelot::{
-    analysis::dis::{zydis, DecodedOperandKind},
-    arch::Arch,
-    VA,
+use crate::{
+    dis::{self, zydis, DecodedOperandKind},
+    program::{Arch, BasicBlock, Function, VA},
+    workspace::Workspace,
 };
-
-use crate::workspace::{BasicBlock, Function, Workspace};
 
 const LOW: f64 = 0.25;
 const MEDIUM: f64 = 0.50;
@@ -271,7 +269,7 @@ fn extract_features(ws: &Workspace, f: &Function, max_calls_to: usize) -> Vec<Fe
 }
 
 /// `xor a, b` where a and b differ.
-fn is_nonzeroing_xor(insn: &lancelot::analysis::dis::DecodedInstruction) -> bool {
+fn is_nonzeroing_xor(insn: &dis::Instruction) -> bool {
     let ops = insn.visible_operands();
     ops.len() == 2 && ops[0].kind != ops[1].kind
 }
@@ -284,7 +282,7 @@ fn is_security_cookie(
     f: &Function,
     bb: &BasicBlock,
     va: VA,
-    insn: &lancelot::analysis::dis::DecodedInstruction,
+    insn: &dis::Instruction,
 ) -> bool {
     use zydis::Register as R;
     if let DecodedOperandKind::Reg(reg) = insn.visible_operands()[1].kind {
@@ -307,7 +305,7 @@ fn is_security_cookie(
 }
 
 /// `mov [reg], reg`: a register-dereferenced write to memory, with no displacement or index.
-fn is_mov_via_register(insn: &lancelot::analysis::dis::DecodedInstruction) -> bool {
+fn is_mov_via_register(insn: &dis::Instruction) -> bool {
     let ops = insn.visible_operands();
     if ops.len() != 2 {
         return false;

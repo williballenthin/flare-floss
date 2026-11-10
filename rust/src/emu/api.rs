@@ -12,7 +12,7 @@
 //! dynamically resolved imports become stubs, too.
 use std::{collections::HashMap, sync::OnceLock};
 
-use lancelot::{arch::Arch, VA};
+use crate::program::{Arch, VA};
 
 use super::Emulator;
 

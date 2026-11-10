@@ -1,13 +1,29 @@
 //! measure the costs of emulation primitives on a real program:
 //! exploring every function twice, so the second time the code is already lifted.
-//! usage: bench <pe>
-use floss::{driver, emu};
+//! usage: bench <ida|lancelot> <file>
+use anyhow::{bail, Result};
+use floss::{driver, emu, program::Program};
 
-fn main() -> anyhow::Result<()> {
+fn load(backend: &str, path: &std::path::Path) -> Result<Program> {
+    match backend {
+        #[cfg(feature = "ida")]
+        "ida" => floss::backend::ida::load(path, &Default::default()),
+        #[cfg(feature = "lancelot")]
+        "lancelot" => floss::backend::lancelot::load_pe(&std::fs::read(path)?, &[]),
+        _ => bail!("this build doesn't have the backend {backend}"),
+    }
+}
+
+fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let buf = std::fs::read(&args[1])?;
+    if args.len() < 3 {
+        bail!("usage: bench <ida|lancelot> <file>");
+    }
     let t = std::time::Instant::now();
-    let ws = floss::workspace::Workspace::from_pe(&buf, &[])?;
+    let program = load(&args[1], std::path::Path::new(&args[2]))?;
+    println!("program ({}): {:?}", args[1], t.elapsed());
+    let t = std::time::Instant::now();
+    let ws = floss::workspace::Workspace::new(program);
     println!("workspace: {:?}", t.elapsed());
     let t = std::time::Instant::now();
     let mut emu = emu::Emulator::new(&ws)?;

@@ -13,7 +13,7 @@ use icicle_vm::cpu::{
 };
 use std::sync::OnceLock;
 
-use lancelot::VA;
+use crate::program::VA;
 
 use super::{Layout, FILL_BYTE, PAGE_SIZE};
 

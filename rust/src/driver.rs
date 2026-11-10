@@ -13,7 +13,7 @@
 //! Observers see each instruction before and after it executes.
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use lancelot::VA;
+use crate::program::VA;
 
 use crate::emu::{Call, CallPolicy, Emulator, Event, ExecOptions, Fault, Flow, Insn};
 

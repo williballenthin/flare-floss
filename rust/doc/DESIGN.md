@@ -12,9 +12,14 @@ See [EVALUATION.md](EVALUATION.md) for how well it works.
 
 ```
                         ┌──────────────────────────────────────────────┐
-  sample.exe ──────────▶│ workspace (lancelot)                         │
-                        │   PE/shellcode loading, functions, blocks,   │
-                        │   callers, imports, thunks, FLIRT (optional) │
+  sample.exe ──────────▶│ backend (IDA Pro, or lancelot)               │
+                        │   loading, segments, functions, blocks,      │
+                        │   thunks, imports, library functions         │
+                        └──────────────┬───────────────────────────────┘
+                                       │ Program (plain data)
+                        ┌──────────────┴───────────────────────────────┐
+                        │ workspace                                    │
+                        │   instruction owners, callers, `ret N`       │
                         └──────────────┬───────────────────────────────┘
                                        │
               ┌────────────────────────┼─────────────────────────┐
@@ -42,10 +47,13 @@ memory, and a rule for which strings to report.
 
 | module | lines | role |
 |---|---|---|
-| `workspace.rs` | ~450 | the program, via lancelot |
-| `flirt.rs` | ~70 | FLIRT signatures: FLOSS's, built in, or files |
-| `emu/mod.rs` | ~800 | the emulator: address space, execution of one instruction, calls |
-| `emu/insn.rs` | ~140 | instruction classification (zydis): control flow, `rep`, `mov` to memory |
+| `program.rs` | ~100 | the program, as a backend provides it: plain data |
+| `backend/ida.rs` | ~400 | the IDA backend: analyze a file with idalib, or open a database, and read the program |
+| `backend/lancelot/` | ~270 | the lancelot backend: PE files and shellcode, and FLIRT signatures (FLOSS's, built in, or files) |
+| `workspace.rs` | ~250 | the program, indexed for the analyses |
+| `dis.rs` | ~60 | instruction decoding (zydis) |
+| `emu/mod.rs` | ~850 | the emulator: address space, execution of one instruction, calls |
+| `emu/insn.rs` | ~100 | instruction classification: control flow, `rep`, `mov` to memory |
 | `emu/api.rs` | ~420 | API models (malloc, memcpy, GetProcAddress, ...) and calling conventions |
 | `emu/snapshot.rs` | ~260 | snapshots of emulator state, and memory diffs |
 | `emu/sleigh.rs` | ~190 | the embedded SLEIGH specs, and icicle VMs built from them |
@@ -56,21 +64,85 @@ memory, and a rule for which strings to report.
 | `tightstrings.rs` | ~90 | tight strings |
 | `decoded.rs` | ~200 | decoded strings |
 
-## The workspace: lancelot
+## Program analysis: a backend, then the workspace
 
-lancelot loads the PE file, finds functions (entry points, exports, call
-targets, pointers that look like code), disassembles them, and builds the
-control flow graph. `Workspace` wraps it with what FLOSS needs:
+A backend loads the file, finds its functions, and builds their control flow
+graphs. It gives floss-rs a `Program`, which is plain data:
+
+  - the architecture (x86 or x64) and the base address,
+  - the segments, with their bytes as loaded (bytes that the file doesn't initialize are zero),
+  - the functions, as basic blocks with their instruction addresses and successors,
+  - which functions are thunks, which are library code, and the names that are known,
+  - the import address table: for each entry, the DLL and the name or ordinal.
+
+Nothing else in floss-rs calls IDA or lancelot, so the emulator and the analyses
+are the same for each backend, and the cost of a new backend is one function
+that fills in a `Program`. The other end is data too: `floss::analyze(program, options)`
+returns a `ResultDocument` and does no input or output. The command line and the
+web page are callers that load a program, call it, and render the results.
+
+`Workspace` indexes the program for the analyses:
 
   - functions as sets of basic blocks, with successors (for tight loop detection),
+  - the function that each instruction belongs to,
   - the callers of each function (for finding decoding routine arguments),
     counting calls to a thunk as calls to its target,
-  - the import address table, the thunks, and (if signatures are given) FLIRT names,
   - for x86, each function's `ret N`, which tells the emulator how many bytes of
     arguments a callee pops when the emulator skips a call.
 
-Raw shellcode becomes a single RWX section at a fixed base address, with
-functions discovered from the first byte.
+floss-rs decodes instructions itself, with zydis (`dis.rs`), from the bytes of
+the program or of the emulator's memory. A backend says where instructions
+are and leaves their meaning to floss-rs, so one decoder serves every backend,
+and also code that the program writes while it runs. zydis is a C library,
+linked statically. lancelot uses the same version, so a binary has one copy.
+
+### IDA
+
+The IDA backend links to IDA through idalib, and uses IDA's loaders,
+auto-analysis, and signatures. `backend::ida::validate_available` tells
+whether IDA can be used: its libraries are loaded, it starts, and it has a
+license. The command line asks that once, before it picks a backend. From the database it reads the segments, each
+function's flow chart, the thunk and library flags, the names that IDA or the
+user gave (not the `sub_` placeholders), and the import modules.
+
+By default the database is in a temporary directory, so floss-rs writes
+nothing next to the sample. With `--idb`, the database is at that path. It's
+opened if it exists, and otherwise created and kept, so the second run skips
+the analysis, and the user can open the same database in IDA. An existing
+database is opened as it is. floss-rs doesn't analyze it again and doesn't
+save it, so floss-rs sees the user's work in it and leaves it untouched.
+
+IDA loads a file without a format as data at address zero. For shellcode, the
+backend moves that data to the base address that the lancelot backend uses,
+sets the bitness, and marks the first byte as the start of a function. A file
+with a format that is given as shellcode is an error, and so is a file
+without a format that isn't given as shellcode.
+
+IDA works on the thread that started it, with one database open. The backend
+reads the whole program, closes the database, and returns. Emulation then
+runs on many threads without IDA.
+
+floss-rs wants the contents of the file, so the backend leaves out the
+debugger segments of a database. Hex-Rays' Malware Analysis Add-On unpacks a
+program when IDA opens it, by running it in a debugger. The database then has
+the memory of that process, where decoding has already happened or the data
+is gone. The backend warns when a debugger is active. It leaves IDA's
+configuration alone: the user turns the unpacker off, with
+`IDA_MALWARE_DISABLE_UNPACKER=1` in the environment.
+
+Code that runs inside IDA, with a database open, gets the same `Program` from
+`backend::ida::get_program`.
+
+### lancelot
+
+lancelot is a Rust library, built in. It loads the PE file, finds functions
+(entry points, exports, call targets, pointers that look like code),
+disassembles them, and builds the control flow graph. Library functions are
+named when FLIRT signatures are given. Raw shellcode becomes a single RWX
+section at a fixed base address, with functions discovered from the first byte.
+
+When a backend can't load a file, such as a .NET assembly, floss-rs warns and
+reports the static strings only.
 
 ## The emulator: icicle in a forgiving address space
 
@@ -91,7 +163,7 @@ FLOSS emulates code out of context: from the start of some function, with
 no process around it, and arguments that are garbage. So the address space is
 built to keep code running rather than to be faithful:
 
-  - **the image**: each section is mapped read/write, and executable if it is in the PE.
+  - **the image**: each segment is mapped read/write, and executable if it is in the program.
   - **the stack**: 512KB filled with `0xFE`, with the stack pointer in the middle,
     so code can read its "arguments".
   - **the heap**: a bump allocator for the API models.
@@ -269,10 +341,32 @@ The floss-rs binary is self-contained: `build.rs` embeds everything it reads
 at runtime, so it needs no files and writes none.
 
   - the x86 SLEIGH specifications (2.3MB), from `deps/open_sleigh`;
-  - FLOSS's FLIRT signatures (15MB, used with `--flirt`), from `floss/sigs`;
+  - FLOSS's FLIRT signatures (15MB, used with `--flirt`, for the lancelot backend), from `floss/sigs`;
   - the table of Windows API calling conventions (`build_apis.rs`), from `deps/win32json` and `deps/phnt`.
 
-Built for `x86_64-unknown-linux-musl`, it's also statically linked, so it runs
+The binary has both backends, and one dynamic dependency, IDA's libraries. A
+build with only the lancelot backend has none. `build.rs` links to the stub
+libraries of the IDA SDK, and records the directory of the IDA installation as
+a search path. On macOS the two libraries
+are weak: when the dynamic linker doesn't find them, floss-rs still starts, and
+the addresses of IDA's symbols are null. `backend::ida::is_loaded` asks the
+linker for one of them, and nothing calls IDA when the answer is no. In both
+cases IDA can be present without a license, and then floss-rs uses lancelot.
+
+Linux and Windows have no such link, so a binary with the IDA backend doesn't
+start there without IDA's libraries. An ELF file can't mark a library as
+optional, and Windows delay loading doesn't cover imported data, which IDA's
+interface has. The way to make IDA optional on those systems is a dynamic
+library for the IDA backend. That library links to IDA and exports one C
+function, which analyzes a file and returns the `Program` as serialized data.
+floss-rs loads it at run time, with `dlopen` or `LoadLibrary`, and uses
+lancelot when the load fails. The main binary then has no link to IDA, so it
+starts on every system. `Program` is plain data, so the interface stays one
+function wide. The cost is a second build product: it ships beside the binary,
+or the binary embeds it and writes it to a file before the load. floss-rs
+doesn't have this library.
+
+Built for `x86_64-unknown-linux-musl` with only the lancelot backend, it's also statically linked, so it runs
 on any Linux, whatever its C library. musl's allocator made it 70% slower than
 the glibc build, so a static build uses mimalloc, which leaves it ~10% slower
 (40 capa test files: 91s with glibc, 100s static). The `dist` profile leaves out
@@ -280,8 +374,8 @@ debug information: the static binary is 28MB, of which 15MB is the signatures.
 
 ## In a browser
 
-`web/` builds floss-rs as WebAssembly, for a page that analyzes a dropped
-file without uploading it. The code is the same; three things differ:
+`web/` builds floss-rs as WebAssembly, with the lancelot backend, for a page
+that analyzes a dropped file without uploading it. The code is the same; three things differ:
 
   - **No JIT.** icicle's VM always creates its JIT, which generates machine
     code with cranelift and maps it executable, which WebAssembly can't do.

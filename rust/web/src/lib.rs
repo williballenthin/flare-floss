@@ -67,13 +67,16 @@ pub unsafe extern "C" fn floss_analyze(ptr: *mut u8, len: usize, time_budget: f6
     }
     let buf = Vec::from_raw_parts(ptr, len, len);
     let opts = floss::Options {
-        format: if shellcode { floss::Format::Shellcode32 } else { floss::Format::Pe },
         time_budget: std::time::Duration::from_secs_f64(time_budget.max(0.0)),
         // the browser gives a module one thread, without extra setup (shared memory, cross-origin isolation).
         threads: 1,
         ..Default::default()
     };
-    let json = match floss::analyze(&buf, &opts) {
+    let load = || match shellcode {
+        true => floss::backend::lancelot::load_shellcode(&buf, floss::program::Arch::X32),
+        false => floss::backend::lancelot::load_pe(&buf, &[]),
+    };
+    let json = match floss::analyze_file(&buf, load, &opts) {
         Ok(doc) => serde_json::to_string(&doc),
         Err(e) => serde_json::to_string(&serde_json::json!({ "error": format!("{e:#}") })),
     }

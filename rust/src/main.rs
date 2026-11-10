@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
+use floss::program::{Arch, Program};
 
 /// in a static build, musl's allocator makes floss-rs 70% slower, and mimalloc 10%.
 /// (with glibc, its allocator is a little faster than mimalloc.)
@@ -19,7 +20,7 @@ enum StringType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Format {
-    /// PE files, and shellcode by extension (.sc32, .raw32, .sc64, .raw64)
+    /// what the backend detects, and shellcode by extension (.sc32, .raw32, .sc64, .raw64)
     Auto,
     Pe,
     /// 32-bit shellcode
@@ -28,16 +29,40 @@ enum Format {
     Sc64,
 }
 
+/// The program analysis backend: it finds the functions and control flow of the program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Backend {
+    /// IDA Pro, when it's installed and has a license, and otherwise lancelot
+    Auto,
+    /// IDA Pro: whatever IDA loads, and IDA databases
+    Ida,
+    /// lancelot, which is built in: PE files and shellcode
+    Lancelot,
+}
+
+#[cfg(not(any(feature = "ida", feature = "lancelot")))]
+compile_error!("enable a program analysis backend: the feature `ida` or `lancelot`");
+
 /// FLOSS, the FLARE Obfuscated String Solver: extract obfuscated strings from malware.
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Args {
-    /// path to the PE file to analyze
+    /// path to the file to analyze: a program, shellcode, or (with IDA) an IDA database
     sample: PathBuf,
 
     /// the kind of input
     #[arg(short = 'f', long, value_enum, default_value_t = Format::Auto)]
     format: Format,
+
+    /// the program analysis backend
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    backend: Backend,
+
+    /// with IDA: use this database, which is opened when it exists, and otherwise created and kept
+    /// (default: a temporary database)
+    #[cfg(feature = "ida")]
+    #[arg(long, value_name = "PATH")]
+    idb: Option<PathBuf>,
 
     /// minimum string length
     #[arg(short = 'n', long, default_value_t = 4)]
@@ -51,11 +76,15 @@ struct Args {
     #[arg(long, value_enum, num_args = 1..)]
     no: Vec<StringType>,
 
-    /// recognize library functions with FLOSS's FLIRT signatures, which are built in (loading them takes ~5s)
+    /// with lancelot: recognize library functions with FLOSS's FLIRT signatures, which are built in
+    /// (loading them takes ~5s)
+    #[cfg(feature = "lancelot")]
     #[arg(long)]
     flirt: bool,
 
-    /// recognize library functions with these FLIRT signature files (.sig/.pat), or directories of them, instead
+    /// with lancelot: recognize library functions with these FLIRT signature files (.sig/.pat),
+    /// or directories of them, instead
+    #[cfg(feature = "lancelot")]
     #[arg(long)]
     signatures: Vec<PathBuf>,
 
@@ -85,6 +114,7 @@ fn parse_hex(s: &str) -> Result<u64, String> {
     u64::from_str_radix(s.trim_start_matches("0x"), 16).map_err(|e| e.to_string())
 }
 
+#[cfg(feature = "lancelot")]
 fn expand_signatures(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut sigs = vec![];
     for path in paths {
@@ -102,35 +132,150 @@ fn expand_signatures(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(sigs)
 }
 
-fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,floss=info,lancelot=error")).init();
-    let args = Args::parse();
+/// the architecture of the shellcode, when the input is shellcode.
+fn get_shellcode_arch(args: &Args) -> Option<Arch> {
+    let ext = args
+        .sample
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match (args.format, ext.as_str()) {
+        (Format::Sc32, _) | (Format::Auto, "sc32" | "raw32") => Some(Arch::X32),
+        (Format::Sc64, _) | (Format::Auto, "sc64" | "raw64") => Some(Arch::X64),
+        _ => None,
+    }
+}
 
-    let ext = args.sample.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    let format = match (args.format, ext.as_str()) {
-        (Format::Sc32, _) | (Format::Auto, "sc32" | "raw32") => floss::Format::Shellcode32,
-        (Format::Sc64, _) | (Format::Auto, "sc64" | "raw64") => floss::Format::Shellcode64,
-        _ => floss::Format::Pe,
+#[cfg(feature = "ida")]
+fn validate_ida_available() -> Result<()> {
+    floss::backend::ida::validate_available()
+}
+
+#[cfg(not(feature = "ida"))]
+fn validate_ida_available() -> Result<()> {
+    bail!("this build of floss-rs doesn't have the IDA backend")
+}
+
+/// is the sample an IDA database, or is there a database to make from it? then only IDA will do.
+#[cfg(feature = "ida")]
+fn needs_ida(args: &Args) -> Option<&'static str> {
+    if floss::backend::ida::is_database(&args.sample) {
+        Some("the file is an IDA database")
+    } else if args.idb.is_some() {
+        Some("--idb is given")
+    } else {
+        None
+    }
+}
+
+#[cfg(not(feature = "ida"))]
+fn needs_ida(_args: &Args) -> Option<&'static str> {
+    None
+}
+
+/// The backend to use: the one that `--backend` names,
+/// or else IDA when it can be used, and otherwise lancelot.
+///
+/// This starts IDA, to check for its license, so it must be called from the main thread.
+fn select_backend(args: &Args) -> Result<Backend> {
+    let has_lancelot = cfg!(feature = "lancelot");
+    match (args.backend, needs_ida(args)) {
+        (Backend::Lancelot, _) if !has_lancelot => {
+            bail!("this build of floss-rs doesn't have the lancelot backend")
+        }
+        (Backend::Lancelot, Some(reason)) => bail!("{reason}, which needs the IDA backend"),
+        (Backend::Lancelot, None) => Ok(Backend::Lancelot),
+        (Backend::Ida, _) => validate_ida_available()
+            .map(|()| Backend::Ida)
+            .context("can't use IDA"),
+        (Backend::Auto, reason) => match (validate_ida_available(), reason) {
+            (Ok(()), _) => Ok(Backend::Ida),
+            (Err(e), None) if has_lancelot => {
+                if cfg!(feature = "ida") {
+                    log::info!("using the lancelot backend, because IDA can't be used: {e:#}");
+                }
+                Ok(Backend::Lancelot)
+            }
+            (Err(e), Some(reason)) => {
+                Err(e.context(format!("{reason}, which needs IDA, and IDA can't be used")))
+            }
+            (Err(e), None) => Err(e.context("can't use IDA")),
+        },
+    }
+}
+
+#[cfg(feature = "ida")]
+fn load_with_ida(args: &Args) -> Result<Program> {
+    floss::backend::ida::load(
+        &args.sample,
+        &floss::backend::ida::Options {
+            shellcode: get_shellcode_arch(args),
+            database: args.idb.clone(),
+        },
+    )
+}
+
+#[cfg(not(feature = "ida"))]
+fn load_with_ida(_args: &Args) -> Result<Program> {
+    validate_ida_available().map(|()| unreachable!())
+}
+
+#[cfg(feature = "lancelot")]
+fn load_with_lancelot(args: &Args, buf: &[u8]) -> Result<Program> {
+    use floss::backend::lancelot::{flirt, load_pe, load_shellcode};
+
+    if let Some(arch) = get_shellcode_arch(args) {
+        return load_shellcode(buf, arch);
+    }
+
+    let signatures = if !args.signatures.is_empty() {
+        expand_signatures(&args.signatures)?
+            .iter()
+            .map(|path| flirt::SignatureFile::read(path))
+            .collect::<Result<_>>()?
+    } else if args.flirt {
+        flirt::builtin()
+    } else {
+        vec![]
     };
+    load_pe(buf, &signatures)
+}
 
-    let enabled = |t: StringType| (args.only.is_empty() || args.only.contains(&t)) && !args.no.contains(&t);
-    let opts = floss::Options {
-        format,
+#[cfg(not(feature = "lancelot"))]
+fn load_with_lancelot(_args: &Args, _buf: &[u8]) -> Result<Program> {
+    bail!("this build of floss-rs doesn't have the lancelot backend")
+}
+
+/// the path of the file whose bytes have the static strings.
+fn get_static_strings_path(args: &Args) -> Option<PathBuf> {
+    #[cfg(feature = "ida")]
+    if floss::backend::ida::is_database(&args.sample) {
+        return floss::backend::ida::find_input_file(&args.sample);
+    }
+    Some(args.sample.clone())
+}
+
+fn main() -> Result<()> {
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,floss=info,lancelot=error"),
+    )
+    .init();
+    let args = Args::parse();
+    let backend = select_backend(&args)?;
+    #[cfg(feature = "lancelot")]
+    if backend == Backend::Ida && (args.flirt || !args.signatures.is_empty()) {
+        log::warn!("--flirt and --signatures are for the lancelot backend: IDA recognizes library functions itself");
+    }
+
+    let enabled =
+        |t: StringType| (args.only.is_empty() || args.only.contains(&t)) && !args.no.contains(&t);
+    let mut opts = floss::Options {
         min_length: args.minimum_length,
         static_strings: enabled(StringType::Static),
         stack_strings: enabled(StringType::Stack),
         tight_strings: enabled(StringType::Tight),
         decoded_strings: enabled(StringType::Decoded),
-        signatures: if !args.signatures.is_empty() {
-            expand_signatures(&args.signatures)?
-                .iter()
-                .map(|path| floss::flirt::SignatureFile::read(path))
-                .collect::<Result<_>>()?
-        } else if args.flirt {
-            floss::flirt::builtin()
-        } else {
-            vec![]
-        },
         top_functions: args.top_functions,
         threads: args.threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)),
         time_budget: std::time::Duration::from_secs_f64(args.time_budget.max(0.0)),
@@ -139,11 +284,28 @@ fn main() -> Result<()> {
         } else {
             Some(args.functions.clone())
         },
-        ..Default::default()
     };
 
-    let buf = std::fs::read(&args.sample).with_context(|| format!("read {}", args.sample.display()))?;
-    let mut doc = floss::analyze(&buf, &opts)?;
+    let buf = match get_static_strings_path(&args) {
+        Some(path) => std::fs::read(&path).with_context(|| format!("read {}", path.display()))?,
+        None => {
+            if opts.static_strings {
+                log::warn!(
+                    "can't find the file that {} was made from, so not extracting static strings",
+                    args.sample.display()
+                );
+                opts.static_strings = false;
+            }
+            vec![]
+        }
+    };
+
+    let load = || match backend {
+        Backend::Ida => load_with_ida(&args),
+        Backend::Lancelot => load_with_lancelot(&args, &buf),
+        Backend::Auto => unreachable!("select_backend picks a backend"),
+    };
+    let mut doc = floss::analyze_file(&buf, load, &opts)?;
     doc.metadata.file_path = args.sample.display().to_string();
 
     if args.json {

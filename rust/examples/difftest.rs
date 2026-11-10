@@ -134,20 +134,31 @@ fn gen(out: &str, paths: &[String]) -> Result<()> {
     let mut f = std::io::BufWriter::new(std::fs::File::create(out)?);
     let mut id = 0;
     for path in paths {
-        let Ok(buf) = std::fs::read(path) else { continue };
-        let Ok(ws) = floss::workspace::Workspace::from_pe(&buf, &[]) else { continue };
-        let bits = match ws.arch() {
-            lancelot::arch::Arch::X32 => 32,
-            lancelot::arch::Arch::X64 => 64,
+        let Ok(buf) = std::fs::read(path) else {
+            continue;
         };
-        let module = ws.module();
+        let Ok(pe) = lancelot::loader::pe::PE::from_bytes(&buf) else {
+            continue;
+        };
+        let Ok(decoder) = lancelot::analysis::dis::get_disassembler(&pe.module) else {
+            continue;
+        };
+        let Ok(program) = floss::backend::lancelot::load_pe(&buf, &[]) else {
+            continue;
+        };
+        let ws = floss::workspace::Workspace::new(program);
+        let bits = ws.arch().bitness();
         for f_ in ws.functions() {
             for va in f_.insns() {
-                let Some(insn) = ws.decode(va) else { continue };
+                let Ok(Some(insn)) =
+                    lancelot::analysis::dis::decode(&decoder, ws.read_bytes(va, 16))
+                else {
+                    continue;
+                };
                 if excluded(&insn) {
                     continue;
                 }
-                let bytes = lancelot::aspace::AddressSpace::read_bytes(&module.address_space, va, insn.length as usize)?;
+                let bytes = ws.read_bytes(va, insn.length as usize).to_vec();
                 if !seen.insert((bits, bytes.clone())) {
                     continue;
                 }

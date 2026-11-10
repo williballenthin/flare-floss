@@ -412,6 +412,7 @@ dependencies = [
  "sleigh-parse",
  "smallvec",
  "target-lexicon",
+ "zydis",
 ]
 
 [[package]]

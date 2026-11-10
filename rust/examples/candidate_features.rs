@@ -2,17 +2,51 @@
 //! predict that a routine decodes strings (see scripts/budget/).
 //! besides FLOSS's features, these describe how the function is called (what its callers pass,
 //! and what they do with the result) and what its loops do.
-//! usage: candidate_features <pe>
+//! usage: candidate_features <ida|lancelot> <file>
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use floss::workspace::{Function, Workspace};
-use lancelot::{
-    analysis::dis::{zydis, DecodedOperandKind},
-    arch::Arch,
-    aspace::AddressSpace,
-    VA,
+use anyhow::{bail, Result};
+use floss::{
+    dis::{self, zydis, DecodedOperandKind, Instruction, Mnemonic as M, Register as R},
+    program::{Arch, Function, Program, VA},
+    workspace::Workspace,
 };
-use zydis::{Mnemonic as M, Register as R};
+
+fn load(backend: &str, path: &std::path::Path) -> Result<Program> {
+    match backend {
+        #[cfg(feature = "ida")]
+        "ida" => floss::backend::ida::load(path, &Default::default()),
+        #[cfg(feature = "lancelot")]
+        "lancelot" => floss::backend::lancelot::load_pe(&std::fs::read(path)?, &[]),
+        _ => bail!("this build doesn't have the backend {backend}"),
+    }
+}
+
+/// the address that a memory operand of the instruction at `va` refers to, when it's fixed:
+/// `[rip+N]` or `[N]`.
+fn memory_address(insn: &Instruction, va: VA, op: &zydis::ffi::DecodedOperand) -> Option<VA> {
+    match &op.kind {
+        DecodedOperandKind::Mem(mem) if mem.base == R::RIP => insn.calc_absolute_address(va, op).ok(),
+        DecodedOperandKind::Mem(mem) if mem.base == R::NONE && mem.index == R::NONE => {
+            Some(mem.disp.displacement as u64)
+        }
+        _ => None,
+    }
+}
+
+/// does the instruction have an explicit memory operand, like `[eax+4]`, that is one byte wide?
+fn has_byte_memory_operand(insn: &Instruction) -> bool {
+    insn.visible_operands()
+        .iter()
+        .any(|op| matches!(op.kind, DecodedOperandKind::Mem(_)) && op.size == 8)
+}
+
+/// the function that the instruction at `va` calls directly, like `call 0x401000`.
+fn call_target(insn: &Instruction, va: VA) -> Option<VA> {
+    (insn.mnemonic == M::CALL)
+        .then(|| dis::branch_target(insn, va))
+        .flatten()
+}
 
 /// what a pointer points to.
 #[derive(Debug, PartialEq)]
@@ -28,11 +62,14 @@ enum Pointee {
 }
 
 fn classify(ws: &Workspace, p: VA) -> Option<Pointee> {
-    let section = ws.module().sections.iter().find(|s| s.virtual_range.contains(&p))?;
-    if section.permissions.intersects(lancelot::module::Permissions::X) && section.name != ".data" {
+    let segment = ws
+        .segments()
+        .iter()
+        .find(|s| (s.va..s.end()).contains(&p))?;
+    if segment.executable && segment.name != ".data" {
         return Some(Pointee::Code);
     }
-    let buf = ws.module().address_space.read_bytes(p, 32).unwrap_or_default();
+    let buf = ws.read_bytes(p, 32);
     if buf.is_empty() || buf.iter().all(|&b| b == 0) {
         return Some(Pointee::Zeros);
     }
@@ -52,30 +89,28 @@ fn called_api(ws: &Workspace, imports: &HashMap<VA, String>, va: VA) -> Option<S
     if insn.mnemonic != M::CALL {
         return None;
     }
-    let op = insn.visible_operands().first().cloned()?;
-    let slot = match &op.kind {
-        DecodedOperandKind::Mem(mem) if mem.base == R::RIP => insn.calc_absolute_address(va, &op).ok()?,
-        DecodedOperandKind::Mem(mem) if mem.base == R::NONE && mem.index == R::NONE => mem.disp.displacement as u64,
-        DecodedOperandKind::Imm(_) => {
-            let target = insn.calc_absolute_address(va, &op).ok()?;
-            if !ws.is_thunk(target) {
-                return None;
-            }
-            return called_api(ws, imports, target).or_else(|| {
-                let jmp = ws.decode(target)?;
-                let op = jmp.visible_operands().first().cloned()?;
-                match &op.kind {
-                    DecodedOperandKind::Mem(mem) if mem.base == R::RIP => {
-                        imports.get(&jmp.calc_absolute_address(target, &op).ok()?).cloned()
-                    }
-                    DecodedOperandKind::Mem(mem) if mem.base == R::NONE => imports.get(&(mem.disp.displacement as u64)).cloned(),
-                    _ => None,
-                }
-            });
+    if let Some(target) = dis::branch_target(&insn, va) {
+        if !ws.is_thunk(target) {
+            return None;
         }
-        _ => return None,
-    };
-    imports.get(&slot).cloned()
+        return called_api(ws, imports, target).or_else(|| {
+            let jmp = ws.decode(target)?;
+            imports
+                .get(&memory_address(
+                    &jmp,
+                    target,
+                    jmp.visible_operands().first()?,
+                )?)
+                .cloned()
+        });
+    }
+    imports
+        .get(&memory_address(
+            &insn,
+            va,
+            insn.visible_operands().first()?,
+        )?)
+        .cloned()
 }
 
 /// APIs that take strings that a program would rather hide.
@@ -161,17 +196,11 @@ fn direct_callees(ws: &Workspace, fva: VA) -> Vec<VA> {
     let Some(f) = ws.function(fva) else { return vec![] };
     let mut out = vec![];
     for va in f.insns() {
-        let Some(insn) = ws.decode(va) else { continue };
-        if insn.mnemonic != M::CALL {
+        let Some(target) = ws.decode(va).and_then(|insn| call_target(&insn, va)) else {
             continue;
-        }
-        let Some(op) = insn.visible_operands().first().cloned() else { continue };
-        if let DecodedOperandKind::Imm(_) = op.kind {
-            if let Ok(target) = insn.calc_absolute_address(va, &op) {
-                if ws.function(target).is_some() && !ws.is_thunk(target) {
-                    out.push(target);
-                }
-            }
+        };
+        if ws.function(target).is_some() && !ws.is_thunk(target) {
+            out.push(target);
         }
     }
     out
@@ -220,25 +249,27 @@ fn call_sites(ws: &Workspace, imports: &HashMap<VA, String>, fva: VA) -> CallSit
             }
             let ops = insn.visible_operands();
             let is_arg = match ws.arch() {
-                Arch::X32 => insn.mnemonic == M::PUSH,
+                Arch::X32 => matches!(insn.mnemonic, M::PUSH | M::MOV | M::LEA),
                 Arch::X64 => {
                     matches!(insn.mnemonic, M::MOV | M::LEA)
-                        && matches!(ops.first().map(|o| &o.kind), Some(DecodedOperandKind::Reg(r))
+                        && matches!(ops.first().map(|op| &op.kind), Some(DecodedOperandKind::Reg(r))
                             if matches!(r.largest_enclosing(zydis::MachineMode::LONG_64), R::RCX | R::RDX | R::R8 | R::R9))
                 }
-            } || (matches!(ws.arch(), Arch::X32) && matches!(insn.mnemonic, M::MOV | M::LEA));
+            };
             if !is_arg {
                 continue;
             }
-            let Some(src) = ops.last().cloned() else { continue };
+            let Some(src) = ops.last() else { continue };
             let value = match &src.kind {
                 DecodedOperandKind::Imm(imm) => Some(imm.value),
-                DecodedOperandKind::Mem(mem) if insn.mnemonic == M::LEA && mem.base == R::RIP => {
-                    insn.calc_absolute_address(va, &src).ok()
-                }
-                DecodedOperandKind::Mem(mem) if insn.mnemonic == M::LEA && is_stack_reg(mem.base) => {
+                DecodedOperandKind::Mem(mem)
+                    if insn.mnemonic == M::LEA && is_stack_reg(mem.base) =>
+                {
                     kinds.insert("stack");
                     None
+                }
+                DecodedOperandKind::Mem(mem) if insn.mnemonic == M::LEA && mem.base == R::RIP => {
+                    insn.calc_absolute_address(va, src).ok()
                 }
                 DecodedOperandKind::Mem(mem) if insn.mnemonic == M::LEA && mem.base == R::NONE => {
                     Some(mem.disp.displacement as u64)
@@ -281,12 +312,18 @@ fn call_sites(ws: &Workspace, imports: &HashMap<VA, String>, fva: VA) -> CallSit
     out
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let buf = std::fs::read(&args[1])?;
-    let ws = Workspace::from_pe(&buf, &[])?;
+    if args.len() < 3 {
+        bail!("usage: candidate_features <ida|lancelot> <file>");
+    }
+    let ws = Workspace::new(load(&args[1], std::path::Path::new(&args[2]))?);
     let features = floss::features::find_decoding_function_features(&ws);
-    let imports: HashMap<VA, String> = ws.imports().into_iter().map(|(va, stub)| (va, stub.name)).collect();
+    let imports: HashMap<VA, String> = ws
+        .imports()
+        .iter()
+        .map(|import| (import.va, import.name.clone()))
+        .collect();
 
     for (fva, ff) in features.iter() {
         let f = ws.function(*fva).expect("candidate function");
@@ -304,10 +341,36 @@ fn main() -> anyhow::Result<()> {
                         c("api_calls_out");
                     }
                 }
-                let byte_mem = ops.iter().any(|o| matches!(o.kind, DecodedOperandKind::Mem(_)) && o.size == 8);
-                let byte_reg = ops.iter().any(|o| matches!(&o.kind, DecodedOperandKind::Reg(r) if r.width(zydis::MachineMode::LONG_COMPAT_32) == 8));
-                let writes_mem = ops.first().map(|o| matches!(o.kind, DecodedOperandKind::Mem(_)) && o.action.intersects(zydis::OperandAction::MASK_WRITE)).unwrap_or(false);
-                let arith = matches!(insn.mnemonic, M::XOR | M::ADD | M::SUB | M::NOT | M::NEG | M::ROL | M::ROR | M::SHL | M::SHR | M::IMUL | M::MUL | M::AND | M::OR);
+                let byte_mem = has_byte_memory_operand(&insn);
+                let byte_reg = ops.iter().any(
+                    |op| matches!(&op.kind, DecodedOperandKind::Reg(r) if r.width(zydis::MachineMode::LONG_COMPAT_32) == 8),
+                );
+                // the base register of the memory operand that the instruction writes to.
+                let written_base = match ops.first() {
+                    Some(op) if op.action.intersects(zydis::OperandAction::MASK_WRITE) => {
+                        match &op.kind {
+                            DecodedOperandKind::Mem(mem) => Some(mem.base),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                let arith = matches!(
+                    insn.mnemonic,
+                    M::XOR
+                        | M::ADD
+                        | M::SUB
+                        | M::NOT
+                        | M::NEG
+                        | M::ROL
+                        | M::ROR
+                        | M::SHL
+                        | M::SHR
+                        | M::IMUL
+                        | M::MUL
+                        | M::AND
+                        | M::OR
+                );
                 if byte_mem {
                     c("byte_mem");
                 }
@@ -322,16 +385,15 @@ fn main() -> anyhow::Result<()> {
                     if arith {
                         c("loop_arith");
                     }
-                    if writes_mem {
-                        let base = match &ops[0].kind {
-                            DecodedOperandKind::Mem(m) => m.base,
-                            _ => R::NONE,
-                        };
-                        if !is_stack_reg(base) {
-                            c("loop_ptr_writes");
-                        }
+                    if written_base.is_some_and(|base| !is_stack_reg(base)) {
+                        c("loop_ptr_writes");
                     }
-                    if matches!(insn.mnemonic, M::XOR) && matches!(ops.last().map(|o| &o.kind), Some(DecodedOperandKind::Imm(_))) {
+                    if insn.mnemonic == M::XOR
+                        && matches!(
+                            ops.last().map(|op| &op.kind),
+                            Some(DecodedOperandKind::Imm(_))
+                        )
+                    {
                         c("loop_xor_imm");
                     }
                 }
@@ -341,17 +403,11 @@ fn main() -> anyhow::Result<()> {
         // and functions with loops.
         let mut callees: BTreeMap<VA, usize> = BTreeMap::new();
         for va in f.insns() {
-            let Some(insn) = ws.decode(va) else { continue };
-            if insn.mnemonic != M::CALL {
+            let Some(target) = ws.decode(va).and_then(|insn| call_target(&insn, va)) else {
                 continue;
-            }
-            let Some(op) = insn.visible_operands().first().cloned() else { continue };
-            if let DecodedOperandKind::Imm(_) = op.kind {
-                if let Ok(target) = insn.calc_absolute_address(va, &op) {
-                    if ws.function(target).is_some() && !ws.is_thunk(target) {
-                        *callees.entry(target).or_insert(0) += 1;
-                    }
-                }
+            };
+            if ws.function(target).is_some() && !ws.is_thunk(target) {
+                *callees.entry(target).or_insert(0) += 1;
             }
         }
         let loopy = |t: &VA| ws.function(*t).map(|g| !loop_blocks(g).is_empty()).unwrap_or(false);

@@ -2,10 +2,10 @@
 //! control flow, and a couple of properties the string heuristics care about.
 //!
 //! icicle executes the instruction semantics; this module only
-//! classifies instructions, using zydis via lancelot.
-use lancelot::{
-    analysis::dis::{self, zydis, DecodedOperandKind},
-    VA,
+//! classifies instructions (see `crate::dis`).
+use crate::{
+    dis::{self, zydis, DecodedOperandKind},
+    program::{Arch, VA},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,14 +53,14 @@ impl Insn {
         self.va + self.len as u64
     }
 
-    pub fn decode(decoder: &zydis::Decoder, va: VA, buf: &[u8]) -> Option<Insn> {
-        let insn = dis::decode(decoder, buf).ok()??;
+    pub fn decode(arch: Arch, va: VA, buf: &[u8]) -> Option<Insn> {
+        let insn = dis::decode(arch, buf)?;
 
         use zydis::Mnemonic as M;
         let flow = match insn.mnemonic {
             M::CALL => Flow::Call,
             M::RET => Flow::Ret,
-            M::JMP => Flow::Jump(branch_target(&insn, va)),
+            M::JMP => Flow::Jump(dis::branch_target(&insn, va)),
             M::JB
             | M::JBE
             | M::JCXZ
@@ -82,7 +82,7 @@ impl Insn {
             | M::JZ
             | M::LOOP
             | M::LOOPE
-            | M::LOOPNE => Flow::CondJump(branch_target(&insn, va)?),
+            | M::LOOPNE => Flow::CondJump(dis::branch_target(&insn, va)?),
             M::HLT | M::INT3 | M::INT | M::INT1 | M::INTO | M::UD0 | M::UD1 | M::UD2 | M::IRET | M::IRETD | M::IRETQ => {
                 Flow::Trap
             }
@@ -106,17 +106,9 @@ impl Insn {
     }
 }
 
-fn branch_target(insn: &dis::DecodedInstruction, va: VA) -> Option<VA> {
-    let op = insn.operands().first()?;
-    match op.kind {
-        DecodedOperandKind::Imm(ref imm) if imm.is_relative => insn.calc_absolute_address(va, op).ok(),
-        _ => None,
-    }
-}
-
 /// see `Insn::is_mov_to_memory`.
 /// this mirrors FLOSS's `StackstringContextMonitor.is_stack_mov`.
-fn is_mov_to_memory(insn: &dis::DecodedInstruction) -> bool {
+fn is_mov_to_memory(insn: &dis::Instruction) -> bool {
     let is_mov = insn
         .mnemonic
         .static_string()

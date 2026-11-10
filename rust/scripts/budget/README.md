@@ -39,7 +39,7 @@ The scripts behind "Ranking candidates" in `doc/EVALUATION.md`.
 1. Dump the features of every candidate, one JSON-lines file per sample:
 
        cargo build --release --example candidate_features
-       for f in $(cat files.txt); do ../../target/release/examples/candidate_features "path/to/capa-testfiles/$f" > "features/$f.jsonl"; done
+       for f in $(cat files.txt); do ../../target/release/examples/candidate_features lancelot "path/to/capa-testfiles/$f" > "features/$f.jsonl"; done
 
 2. Compare features and scores against what each routine found (with `$BUDGET_DATA` as above):
 

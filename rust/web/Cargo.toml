@@ -10,7 +10,8 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-floss = { path = ".." }
+# lancelot is the backend that builds for WebAssembly.
+floss = { path = "..", default-features = false, features = ["lancelot"] }
 serde_json = "1"
 log = "0.4"
 

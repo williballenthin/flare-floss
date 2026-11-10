@@ -2,7 +2,11 @@
 //!
 //! The pieces, from the bottom up:
 //!
-//!   - `workspace`: the program, via lancelot: functions, blocks, imports, callers.
+//!   - `program`: the program under analysis, as plain data: segments, functions, blocks, imports.
+//!   - `backend`: the program analysis backends, which load a file into a `program::Program`:
+//!     IDA Pro (via idalib) and lancelot.
+//!   - `workspace`: the program, indexed for the analyses.
+//!   - `dis`: instruction decoding (zydis).
 //!   - `emu`: an x86/x64 emulator (icicle) in a forgiving address space,
 //!     with snapshots, memory diffs, and models of common APIs.
 //!   - `driver`: strategies for running the emulator through code:
@@ -11,41 +15,36 @@
 //!   - the analyses, which combine the above:
 //!     `stackstrings`, `tightstrings`, `features` (which functions to emulate),
 //!     and `decoded` (emulate decoding routines).
+//!
+//! Only the backends read files or talk to other programs. The rest is a function
+//! from a `Program` to a `results::ResultDocument`: see `analyze`.
 use std::time::Instant;
 
 use anyhow::Result;
 
+pub mod backend;
 pub mod decoded;
+pub mod dis;
 pub mod driver;
 pub mod emu;
 pub mod features;
-pub mod flirt;
+pub mod program;
 pub mod results;
 pub mod stackstrings;
 pub mod strings;
 pub mod tightstrings;
 pub mod workspace;
 
+use program::Program;
 use results::{ResultDocument, StaticString};
-
-/// The kind of input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    Pe,
-    Shellcode32,
-    Shellcode64,
-}
 
 #[derive(Debug, Clone)]
 pub struct Options {
-    pub format:          Format,
-    pub min_length:      usize,
-    pub static_strings:  bool,
-    pub stack_strings:   bool,
-    pub tight_strings:   bool,
+    pub min_length: usize,
+    pub static_strings: bool,
+    pub stack_strings: bool,
+    pub tight_strings: bool,
     pub decoded_strings: bool,
-    /// FLIRT signatures, to recognize library functions (see `flirt::builtin`).
-    pub signatures:      Vec<flirt::SignatureFile>,
     /// how many of the top-scoring candidate decoding routines to emulate, at least.
     pub top_functions:   usize,
     /// after those, keep emulating more candidates until decoding has taken this long.
@@ -60,18 +59,25 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            format:          Format::Pe,
-            min_length:      strings::MIN_LENGTH,
-            static_strings:  true,
-            stack_strings:   true,
-            tight_strings:   true,
+            min_length: strings::MIN_LENGTH,
+            static_strings: true,
+            stack_strings: true,
+            tight_strings: true,
             decoded_strings: true,
-            signatures:      vec![],
-            top_functions:   20,
-            time_budget:     std::time::Duration::from_secs(5),
-            functions:       None,
-            threads:         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+            top_functions: 20,
+            time_budget: std::time::Duration::from_secs(5),
+            functions: None,
+            threads: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
         }
+    }
+}
+
+impl Options {
+    /// are any of the strings that take program analysis and emulation enabled?
+    pub fn has_obfuscated_strings(&self) -> bool {
+        self.stack_strings || self.tight_strings || self.decoded_strings
     }
 }
 
@@ -127,45 +133,69 @@ fn seconds(t: Instant) -> f64 {
     (t.elapsed().as_secs_f64() * 1000.0).round() / 1000.0
 }
 
-pub fn analyze(buf: &[u8], opts: &Options) -> Result<ResultDocument> {
+/// The ASCII and UTF-16LE strings in the bytes of a file.
+pub fn extract_static_strings(buf: &[u8], min_length: usize) -> Vec<StaticString> {
+    strings::extract_ascii_utf16(buf)
+        .into_iter()
+        .filter(|s| s.string.len() >= min_length)
+        .map(|s| StaticString {
+            string: s.string,
+            offset: s.offset as u64,
+            encoding: s.encoding,
+        })
+        .collect()
+}
+
+/// Extract the strings of a file: the static strings from its bytes,
+/// and the obfuscated strings from the program that `load` makes of it, with a backend.
+///
+/// When the backend can't load the file, such as a .NET assembly,
+/// the result has the static strings only, like FLOSS.
+pub fn analyze_file(
+    buf: &[u8],
+    load: impl FnOnce() -> Result<Program>,
+    opts: &Options,
+) -> Result<ResultDocument> {
+    let t0 = Instant::now();
+
+    let mut static_strings = vec![];
+    let mut static_strings_runtime = 0.0;
+    if opts.static_strings {
+        let t = Instant::now();
+        static_strings = extract_static_strings(buf, opts.min_length);
+        static_strings_runtime = seconds(t);
+    }
+
+    let mut doc = ResultDocument::default();
+    doc.metadata.min_length = opts.min_length;
+    if opts.has_obfuscated_strings() {
+        let t = Instant::now();
+        match load() {
+            Ok(program) => {
+                let load_runtime = seconds(t);
+                doc = analyze(program, opts)?;
+                doc.metadata.runtime.workspace += load_runtime;
+            }
+            Err(e) => {
+                log::warn!("can't analyze the program, so only extracting static strings: {e:#}")
+            }
+        }
+    }
+
+    doc.strings.static_strings = static_strings;
+    doc.metadata.runtime.static_strings = static_strings_runtime;
+    doc.metadata.runtime.total = seconds(t0);
+    Ok(doc)
+}
+
+/// Extract the obfuscated strings of a program: stack strings, tight strings, and decoded strings.
+pub fn analyze(program: Program, opts: &Options) -> Result<ResultDocument> {
     let t0 = Instant::now();
     let mut doc = ResultDocument::default();
     doc.metadata.min_length = opts.min_length;
 
-    if opts.static_strings {
-        let t = Instant::now();
-        doc.strings.static_strings = strings::extract_ascii_utf16(buf)
-            .into_iter()
-            .filter(|s| s.string.len() >= opts.min_length)
-            .map(|s| StaticString {
-                string:   s.string,
-                offset:   s.offset as u64,
-                encoding: s.encoding,
-            })
-            .collect();
-        doc.metadata.runtime.static_strings = seconds(t);
-    }
-
-    if !(opts.stack_strings || opts.tight_strings || opts.decoded_strings) {
-        doc.metadata.runtime.total = seconds(t0);
-        return Ok(doc);
-    }
-
     let t = Instant::now();
-    let ws = match opts.format {
-        Format::Pe => workspace::Workspace::from_pe(buf, &opts.signatures),
-        Format::Shellcode32 => workspace::Workspace::from_shellcode(buf, lancelot::arch::Arch::X32),
-        Format::Shellcode64 => workspace::Workspace::from_shellcode(buf, lancelot::arch::Arch::X64),
-    };
-    let ws = match ws {
-        Ok(ws) => ws,
-        Err(e) => {
-            // like FLOSS, still report the static strings, such as for .NET assemblies.
-            log::warn!("can't analyze the program, so only extracting static strings: {e}");
-            doc.metadata.runtime.total = seconds(t0);
-            return Ok(doc);
-        }
-    };
+    let ws = workspace::Workspace::new(program);
     let mut emu = emu::Emulator::new(&ws)?;
     doc.metadata.imagebase = ws.base_address();
     doc.analysis.functions_discovered = ws.functions().count();

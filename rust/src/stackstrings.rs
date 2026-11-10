@@ -13,7 +13,7 @@
 //! (which FLOSS doesn't). These are reported as decoded strings, since they have addresses.
 use std::collections::{BTreeSet, HashSet};
 
-use lancelot::VA;
+use crate::program::VA;
 
 use crate::{
     driver::{self, Control, Observer},

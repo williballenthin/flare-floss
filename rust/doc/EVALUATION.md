@@ -14,7 +14,7 @@ instructions sampled from real malware. The gaps are known and bounded.
   - Python FLOSS: upstream `mandiant/flare-floss` at v4.0.0a2 (2026-10-21), vivisect 1.3.2,
     run without FLIRT signatures (`--signatures` with an empty directory),
     cache disabled, `--string-type stack tight decoded`.
-  - floss-rs: this directory, release build, defaults (no FLIRT signatures,
+  - floss-rs: this directory, release build, the lancelot backend, defaults (no FLIRT signatures,
     5 second time budget for decoding routines, threads for each CPU) unless noted.
   - Corpora:
       - the FLOSS test files (`mandiant/flare-floss-testfiles`): 43 Windows binaries
@@ -141,6 +141,22 @@ Scheduler and registry configuration keys, and key material. They also
 include noise, like intermediate states of decoders (`w1X1_1\1V1C1`) and
 crypto tables built at run time. Most of the extra strings, and most of the
 noise, come from emulating more candidates.
+
+### IDA and lancelot
+
+The two backends, on 70 files (the 44 programs that FLOSS's tests build from
+source, `test-decode-to-stack.exe`, one malware sample, and the 24 builds in
+`tests/programs`), with `--time-budget 0`, IDA Pro 9.5:
+
+  - the stack, tight, and decoded strings are the same for every file: 123
+    strings, and none that only one backend finds;
+  - IDA finds 3,911 functions, and marks 474 of them as library code with its
+    own signatures; lancelot, without signatures, finds 2,757;
+  - a file takes 1.5s with IDA (0.7-1.0s when IDA loads no user plugins), and
+    0.1s with lancelot: starting IDA and its auto-analysis are most of the difference;
+  - on the 32-bit shellcode of FLOSS's tests, each finds the same 9 stack strings.
+
+The end-to-end tests (`tests/common`) run once for each backend.
 
 ## How long to emulate decoding routines
 
@@ -461,13 +477,18 @@ icicle's design (SLEIGH semantics, Rust, copy-on-write snapshots) fits FLOSS wel
 
 ## What's not here (yet)
 
-  - **ELF and Mach-O**: lancelot loads PE, COFF, and shellcode. FLOSS uses vivisect for ELF.
+  - **ELF and Mach-O**: lancelot loads PE, COFF, and shellcode. The IDA backend
+    passes on any x86 program that IDA loads, but the API models, the calling
+    conventions, and the tests are for Windows programs. FLOSS uses vivisect for ELF.
+  - **PE headers and resources, with IDA**: IDA's PE loader makes segments for the
+    sections, without the header and the resources, so code that reads those
+    reads the void.
   - **Language-specific strings** (Go, Rust), **layout-aware static strings and tags**,
     rendering (FLOSS's text and HTML output), result caching: not ported;
     these don't involve emulation.
-  - **FLIRT** works, but is opt-in (`--signatures`): loading FLOSS's signatures
-    costs ~5s. Without FLIRT, statically linked library functions like `memcpy`
-    are emulated rather than modeled.
+  - **FLIRT**, with lancelot, works, but is opt-in (`--flirt`, `--signatures`): loading
+    FLOSS's signatures costs ~5s. Without FLIRT, statically linked library functions
+    like `memcpy` are emulated rather than modeled. IDA applies its own signatures.
   - **Calling conventions** for functions in the program come from `ret N`;
     vivisect does more analysis.
   - **Return address repair**: FLOSS's `ApiMonitor` recovers when a decoder

@@ -6,7 +6,7 @@
 //! This is like FLOSS's `tightstrings.py`, which looks for strings on the stack
 //! after the loop that weren't there before it. Diffing memory finds those too,
 //! plus strings the loop decodes into global memory or the heap.
-use lancelot::VA;
+use crate::program::VA;
 
 use crate::{
     driver::{self, Limits},
