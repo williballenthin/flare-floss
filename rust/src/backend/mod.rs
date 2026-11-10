@@ -3,7 +3,7 @@
 //!
 //! The backends are cargo features, and a build can have both.
 
-#[cfg(feature = "ida")]
+#[cfg(feature = "ida-database")]
 pub mod ida;
 #[cfg(feature = "lancelot")]
 pub mod lancelot;

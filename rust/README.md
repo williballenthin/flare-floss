@@ -77,6 +77,41 @@ cargo build --profile dist --target x86_64-unknown-linux-musl --no-default-featu
 
 That's a 28MB file, about 10% slower than the glibc build.
 
+### In IDA
+
+`ida-plugin/` is floss-rs as a plugin for IDA Pro 9.5, a native library written
+in Rust. Edit > Plugins > FLOSS extracts the stack strings, tight strings, and
+decoded strings of the open database, and prints them to the output window:
+
+```
+FLOSS: extracting obfuscated strings
+FLOSS STACK STRINGS (1)
+0x140001064: kernel32.dll
+FLOSS TIGHT STRINGS (0)
+FLOSS DECODED STRINGS (1)
+0x140001000: kernel32.dll
+FLOSS: finished in 0.07s
+```
+
+A double click on an address goes there. For a stack string or a tight string,
+it's the instruction where floss-rs found the string. For a decoded string,
+it's the call to the decoding routine.
+
+```
+cd ida-plugin
+cargo build --release
+cp target/release/libfloss_ida.dylib ~/.idapro/plugins/
+```
+
+The library is `libfloss_ida.so` on Linux, and `floss_ida.dll` on Windows,
+where the directory is `%APPDATA%\Hex-Rays\IDA Pro\plugins`. The build finds
+IDA as the floss-rs build does.
+
+The plugin reads the program from the database, like the IDA backend, so it
+works from the functions and names that the user has there. It runs with the
+default options, and IDA waits until it finishes. It doesn't print static
+strings, which IDA's Strings window has. The database is x86 or x64.
+
 ### In a browser
 
 floss-rs also compiles to WebAssembly, with the lancelot backend: `web/` is a
@@ -129,7 +164,7 @@ src/
   lib.rs             the pipeline: analyze a file, return results
   program.rs         the program, as a backend describes it: plain data
   backend/           the backends, which make a program from a file
-    ida.rs             IDA Pro, through idalib
+    ida/               IDA Pro, through idalib
     lancelot/          lancelot, and its FLIRT signatures
   workspace.rs       the program, indexed for the analyses: owners, callers, thunks
   dis.rs             instruction decoding
@@ -152,6 +187,7 @@ deps/                submodules: open_sleigh (SLEIGH specifications),
                      win32json (win32metadata as JSON), phnt (native API headers)
 tests/               unit tests against Python FLOSS's string functions,
                      and end-to-end tests on programs in tests/programs, with each backend
+ida-plugin/          the IDA plugin, and its tests
 web/                 the browser build: WebAssembly, and a page for it
 examples/            inspect (what a backend sees), bench, candidate_features, difftest (vs Unicorn)
 scripts/             difftest_unicorn.py; budget/: how the time budget was chosen
@@ -164,8 +200,11 @@ tests/programs/build.sh                    # build the test programs; needs clan
 cargo test --release
 cargo test --release --test ida -- --test-threads=1   # end to end, with IDA
 cargo test --release --test lancelot                  # end to end, with lancelot
+(cd ida-plugin && cargo test --release)               # the plugin, inside IDA
 ```
 
 The end-to-end tests are in `tests/common`, and run once with each backend.
 IDA only works on the main thread, so `tests/test_ida.rs` runs its tests there,
 one at a time, with [libtest-mimic](https://github.com/LukasKalbertodt/libtest-mimic).
+The plugin's tests start `idat`, the text-mode IDA, on a test program, run the
+plugin there, and read the strings from IDA's log.

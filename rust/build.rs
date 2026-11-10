@@ -18,7 +18,7 @@ mod apis;
 /// IDA's default installation directory), or along the library search path of the dynamic linker.
 ///
 /// On macOS, they're weak libraries, so floss-rs also runs when IDA isn't there: see `backend::ida::is_loaded`.
-#[cfg(feature = "ida")]
+#[cfg(feature = "ida-database")]
 fn link_ida() {
     if env::var("CARGO_CFG_TARGET_OS").unwrap() != "macos" {
         idalib_build::configure_linkage()
@@ -40,7 +40,7 @@ fn link_ida() {
 }
 
 fn main() {
-    #[cfg(feature = "ida")]
+    #[cfg(feature = "ida-database")]
     link_ida();
 
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

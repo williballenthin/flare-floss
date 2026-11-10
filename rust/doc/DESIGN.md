@@ -48,7 +48,7 @@ memory, and a rule for which strings to report.
 | module | lines | role |
 |---|---|---|
 | `program.rs` | ~100 | the program, as a backend provides it: plain data |
-| `backend/ida.rs` | ~400 | the IDA backend: analyze a file with idalib, or open a database, and read the program |
+| `backend/ida/` | ~420 | the IDA backend: read the program from a database (`mod.rs`), which it makes from a file with idalib, or opens (`library.rs`) |
 | `backend/lancelot/` | ~270 | the lancelot backend: PE files and shellcode, and FLIRT signatures (FLOSS's, built in, or files) |
 | `workspace.rs` | ~250 | the program, indexed for the analyses |
 | `dis.rs` | ~60 | instruction decoding (zydis) |
@@ -131,7 +131,10 @@ configuration alone: the user turns the unpacker off, with
 `IDA_MALWARE_DISABLE_UNPACKER=1` in the environment.
 
 Code that runs inside IDA, with a database open, gets the same `Program` from
-`backend::ida::get_program`.
+`backend::ida::get_program`. That function is the cargo feature
+`ida-database`. The feature `ida` adds the rest of the backend, which starts
+IDA as a library and opens databases (`backend/ida/library.rs`). The
+[IDA plugin](#in-ida) builds with `ida-database` alone.
 
 ### lancelot
 
@@ -394,6 +397,41 @@ that analyzes a dropped file without uploading it. The code is the same; three t
 On 10 capa test files, the results are identical to the native build's, at
 about half its speed on one thread. FLOSS's FLIRT signatures are left out
 (15MB): the web build doesn't reference them, so the linker drops them.
+
+## In IDA
+
+`ida-plugin/` builds floss-rs as a plugin for IDA: a dynamic library that IDA
+loads from its plugins directory when it opens a database. It's about 100
+lines on idalib's plugin support. A type implements idalib's `IDAPlugin`, and
+the `#[plugin]` attribute generates the `PLUGIN` structure that IDA looks for
+in the library. When the user runs the plugin, it reads the `Program` from
+the open database with `backend::ida::get_program`, calls `floss::analyze`,
+and prints the strings with IDA's `msg`.
+
+The plugin is a workspace of its own, like the web build. idalib's `plugin`
+feature changes idalib from a library that hosts IDA to one that IDA hosts,
+and takes away what the IDA backend opens databases with. Cargo builds idalib
+once for a workspace, with one set of features, so the plugin can't share a
+workspace with the command line. It depends on floss-rs with the feature
+`ida-database` and no other backend.
+
+IDA calls the plugin on its main thread. That thread reads the database and
+then emulates, with helper threads on larger programs, as in the command
+line. IDA waits, and the user gets it back when the strings are printed.
+floss-rs's log messages go to the output window. They can come from a helper
+thread, which IDA's `msg` allows. A panic that unwinds out of Rust code into
+IDA ends the process, so the plugin catches a panic of the analysis and
+reports it as an error in the output window.
+
+The library links to `libida` and `libidalib`, as idalib does, and finds them
+next to the IDA program that loads it.
+
+The tests (`ida-plugin/tests`) run the plugin where it runs for users. Each
+starts `idat` on a copy of a test program, with an IDC script that waits for
+the analysis, runs the plugin, and exits. The test then reads what the plugin
+printed from IDA's log file. Cargo builds a library for a package's tests
+only when the tests can link to it, so the library is also an `rlib`, which
+nothing uses.
 
 ## Choices, and what they cost
 

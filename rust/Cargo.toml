@@ -30,9 +30,12 @@ required-features = ["lancelot"]
 # a build has both, and floss-rs picks one when it runs.
 #   - ida: IDA Pro, via idalib. needs an IDA installation to build, and uses one when it runs, if there is one.
 #   - lancelot: pure Rust. the only backend of builds that can't link to IDA: static binaries and WebAssembly.
+# ida-database is the part of ida that reads the program from a database that's open in IDA.
+# it's for code that runs inside IDA, which can't use IDA as a library: see ida-plugin.
 [features]
 default = ["ida", "lancelot"]
-ida = ["dep:idalib", "dep:idalib-build", "dep:tempfile", "dep:libc"]
+ida = ["ida-database", "dep:tempfile", "dep:libc"]
+ida-database = ["dep:idalib", "dep:idalib-build"]
 lancelot = ["dep:lancelot", "dep:lancelot-flirt"]
 
 [dependencies]
