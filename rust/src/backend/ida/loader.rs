@@ -5,6 +5,7 @@
 //!
 //!   - macOS: they're weak libraries (see `build.rs`). The dynamic linker loads them when the
 //!     program starts, if it finds them. Otherwise the address of each of their symbols is null.
+//!     The binary names no directory for them, so the dynamic linker finds them on its search path only.
 //!   - Windows: they're delay-loaded DLLs (see `build.rs`). A call to one of their functions goes
 //!     through a thunk of the linker, which loads the DLL the first time. `load_libraries` loads
 //!     the DLLs before that, from IDA's directory. A variable can't have a thunk: the code reads
@@ -15,14 +16,23 @@
 //!     The variables are defined here too, and exported (see `build.rs`), so the libraries
 //!     use these instead of their own, as they do for a program that links to them.
 //!
-//! On Windows and Linux, `load_libraries` finds IDA when floss-rs runs: see `find_and_load`.
-use std::sync::OnceLock;
+//! `load_libraries` finds IDA when floss-rs runs: see `find_and_load`. On macOS, the dynamic linker
+//! has to find the libraries when the program starts, so there `load_libraries` starts the program
+//! again, with IDA's directory on the dynamic linker's search path.
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use anyhow::{anyhow, Result};
 
 /// Load IDA's libraries into this process, if they aren't there yet.
 ///
 /// Nothing of IDA can be used before this succeeds.
+///
+/// On macOS, this replaces the process with a new one of the same program and arguments,
+/// when IDA is installed and the dynamic linker didn't find it.
 pub fn load_libraries() -> Result<()> {
     static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
     LOADED
@@ -31,54 +41,38 @@ pub fn load_libraries() -> Result<()> {
         .map_err(|e| anyhow!(e))
 }
 
-#[cfg(target_os = "macos")]
-fn find_and_load() -> Result<(), String> {
-    let init_library = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"init_library".as_ptr()) };
-    if init_library.is_null() {
-        return Err("IDA's libraries (libida.dylib and libidalib.dylib) aren't found".into());
-    }
-    Ok(())
-}
-
 /// Find IDA, and load its libraries: from `$IDADIR`, or else from the first of
 /// `find_directories` that has them, or else from where the system searches for libraries.
 ///
 /// IDA uses `$IDADIR` whatever the directory of its libraries, and ends the process
 /// when that isn't an installation. So when `$IDADIR` is set, IDA is there or nowhere.
-#[cfg(any(target_os = "linux", windows))]
 fn find_and_load() -> Result<(), String> {
-    use std::{env, path::Path, path::PathBuf};
-
     let has_ida = |directory: &Path| directory.join(platform::IDALIB).is_file();
-    let load = |directory: &Path| {
-        log::debug!("loading IDA's libraries from {}", directory.display());
-        platform::load_from(Some(directory))
-            .map_err(|e| format!("IDA in {} can't be loaded: {e}", directory.display()))
-    };
 
-    if let Some(directory) = env::var_os("IDADIR").filter(|d| !d.is_empty()).map(PathBuf::from) {
-        if !has_ida(&directory) {
+    let directory = match env::var_os("IDADIR").filter(|d| !d.is_empty()).map(PathBuf::from) {
+        Some(directory) if !has_ida(&directory) => {
             return Err(format!("IDA isn't in $IDADIR ({})", directory.display()));
         }
-        return load(&directory);
+        Some(directory) => Some(directory),
+        None => find_directories().into_iter().find(|d| has_ida(d)),
+    };
+
+    match directory {
+        Some(directory) => {
+            log::debug!("loading IDA's libraries from {}", directory.display());
+            platform::load_from(Some(&directory))
+                .map_err(|e| format!("IDA in {} can't be loaded: {e}", directory.display()))
+        }
+        None => platform::load_from(None).map_err(|e| {
+            log::debug!("the system doesn't find IDA's libraries: {e}");
+            format!("IDA's libraries ({} and {}) aren't found", platform::IDA, platform::IDALIB)
+        }),
     }
-    if let Some(directory) = find_directories().into_iter().find(|d| has_ida(d)) {
-        return load(&directory);
-    }
-    platform::load_from(None).map_err(|e| {
-        log::debug!("the system doesn't find IDA's libraries: {e}");
-        format!("IDA's libraries ({} and {}) aren't found", platform::IDA, platform::IDALIB)
-    })
 }
 
-/// The directories where IDA may be: the default installation of `ida-config.json`
-/// (which `hcli ida set-default` writes), and the directory where IDA's installer puts it.
-#[cfg(any(target_os = "linux", windows))]
-fn find_directories() -> Vec<std::path::PathBuf> {
-    use std::{env, path::PathBuf};
-
-    let mut directories = vec![];
-
+/// The directories where IDA's libraries may be: in the default installation of `ida-config.json`
+/// (which `hcli ida set-default` writes), and in the directory where IDA's installer puts it.
+fn find_directories() -> Vec<PathBuf> {
     // IDA's user directory.
     let user = match env::var_os("IDAUSR") {
         Some(directories) => env::split_paths(&directories).next(),
@@ -87,28 +81,83 @@ fn find_directories() -> Vec<std::path::PathBuf> {
         }
         None => env::var_os("HOME").map(|d| PathBuf::from(d).join(".idapro")),
     };
-    if let Some(directory) = user
+    let configured = user
         .and_then(|user| std::fs::read_to_string(user.join("ida-config.json")).ok())
-        .and_then(|config| parse_install_directory(&config))
-    {
-        directories.push(directory);
-    }
+        .and_then(|config| parse_install_directory(&config));
 
     let default = if cfg!(windows) {
         env::var_os("ProgramFiles").map(|d| PathBuf::from(d).join("IDA Professional 9.5"))
+    } else if cfg!(target_os = "macos") {
+        Some(PathBuf::from("/Applications/IDA Professional 9.5.app"))
     } else {
         env::var_os("HOME").map(|d| PathBuf::from(d).join("ida-pro-9.5"))
     };
-    directories.extend(default);
-    directories
+
+    // on macOS, an installation is an application bundle, which has the libraries inside.
+    let get_libraries = |installation: PathBuf| match cfg!(target_os = "macos") {
+        true => installation.join("Contents").join("MacOS"),
+        false => installation,
+    };
+    configured.into_iter().chain(default).map(get_libraries).collect()
 }
 
 /// The default installation of IDA, from the contents of `ida-config.json`.
-#[cfg(any(target_os = "linux", windows, test))]
-fn parse_install_directory(config: &str) -> Option<std::path::PathBuf> {
+fn parse_install_directory(config: &str) -> Option<PathBuf> {
     let config: serde_json::Value = serde_json::from_str(config).ok()?;
     let directory = config.get("Paths")?.get("ida-install-dir")?.as_str()?;
     (!directory.is_empty()).then(|| directory.into())
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use std::{
+        env,
+        io::{self, Write},
+        os::unix::process::CommandExt,
+        path::{Path, PathBuf},
+        process::Command,
+    };
+
+    pub const IDA: &str = "libida.dylib";
+    pub const IDALIB: &str = "libidalib.dylib";
+
+    /// the directories where the dynamic linker looks for a library that it didn't find elsewhere.
+    const SEARCH_PATH: &str = "DYLD_FALLBACK_LIBRARY_PATH";
+    /// the directories that the dynamic linker uses when the variable isn't set.
+    const DEFAULT_SEARCH_PATH: &str = "/usr/local/lib:/usr/lib";
+
+    /// Succeed when the dynamic linker found the libraries at the start of the program.
+    ///
+    /// Otherwise, when the libraries are in the directory, start the program again with the directory
+    /// on the dynamic linker's search path. Then this doesn't return.
+    pub fn load_from(directory: Option<&Path>) -> Result<(), String> {
+        let init_library = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"init_library".as_ptr()) };
+        if !init_library.is_null() {
+            return Ok(());
+        }
+        let Some(directory) = directory else {
+            return Err("the dynamic linker didn't find them".into());
+        };
+
+        let search_path = env::var_os(SEARCH_PATH).unwrap_or_else(|| DEFAULT_SEARCH_PATH.into());
+        let mut directories: Vec<PathBuf> = env::split_paths(&search_path).collect();
+        if directories.iter().any(|d| d == directory) {
+            return Err("the dynamic linker searched the directory, and didn't load them".into());
+        }
+        directories.insert(0, directory.into());
+        let search_path = env::join_paths(directories).map_err(|e| e.to_string())?;
+
+        let program = env::current_exe().map_err(|e| e.to_string())?;
+        let mut arguments = env::args_os();
+        let mut command = Command::new(program);
+        if let Some(name) = arguments.next() {
+            command.arg0(name);
+        }
+        log::debug!("starting again, with IDA's libraries");
+        let _ = io::stdout().flush();
+        let error = command.args(arguments).env(SEARCH_PATH, search_path).exec();
+        Err(format!("the program can't start again: {error}"))
+    }
 }
 
 #[cfg(target_os = "linux")]

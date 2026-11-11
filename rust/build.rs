@@ -18,9 +18,9 @@ mod apis;
 /// With the feature `ida`, the binary also runs when IDA isn't there,
 /// so the libraries aren't ordinary dependencies (see `backend::ida::loader`):
 ///
-///   - macOS: they're weak libraries. The dynamic linker finds them in the IDA installation
-///     of this build (`$IDADIR`, or else IDA's default installation directory),
-///     or along its own search path.
+///   - macOS: they're weak libraries. The dynamic linker finds them along its search path,
+///     where the loader puts IDA's directory. The tests find them in the IDA installation
+///     of this build (`$IDADIR`, or else IDA's default installation directory).
 ///   - Windows: they're delay-loaded DLLs.
 ///   - Linux: the binary doesn't link to them. It exports the variables that it shares with them.
 ///
@@ -63,11 +63,10 @@ fn link_ida() {
     } else {
         "-l:libida.so,-l:libidalib.so"
     };
+    // the tests can't start again, so they find the IDA installation of this build.
+    let targets = if is_standalone { "rustc-link-arg-tests" } else { "rustc-link-arg" };
     println!("cargo::rerun-if-env-changed=IDADIR");
-    println!(
-        "cargo::rustc-link-arg=-Wl,-rpath,{}",
-        install_path.display()
-    );
+    println!("cargo::{targets}=-Wl,-rpath,{}", install_path.display());
     println!(
         "cargo::rustc-link-arg=-Wl,-L{},{libraries}",
         stub_path.display()

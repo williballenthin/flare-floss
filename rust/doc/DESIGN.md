@@ -416,8 +416,15 @@ floss-rs uses lancelot. Each system has its own way to make a library optional:
 
   - macOS: the two libraries are weak. When the dynamic linker doesn't find
     them, floss-rs still starts, and the addresses of IDA's symbols are null.
-    The loader asks the linker for one of them. The build records the
-    directory of the IDA installation as a search path.
+    The loader asks the linker for one of them. The dynamic linker binds
+    weak libraries only when the program starts, and the binary names no
+    directory for them. So when the symbols are null and the loader finds
+    IDA, it replaces the process with a new one of the same program and
+    arguments, with IDA's directory at the front of
+    `DYLD_FALLBACK_LIBRARY_PATH`. When the directory is already there and
+    the symbols are still null, IDA can't be loaded, and the loader doesn't
+    start the program again. A test can't start again, so the test binaries
+    record the directory of the IDA installation of the build.
   - Windows: the two libraries are delay-loaded DLLs. A call to a function of
     IDA goes through a thunk of the linker, which loads the DLL at the first
     call. The loader loads both DLLs from IDA's directory before that. Delay
@@ -440,12 +447,13 @@ floss-rs uses lancelot. Each system has its own way to make a library optional:
     statically linked program can't load a dynamic library, so this binary
     needs glibc.
 
-On Windows and Linux, the loader finds IDA when floss-rs runs. IDA itself
-uses `$IDADIR` when that's set, and ends the process when IDA isn't there, so
-then the loader looks in `$IDADIR` only. Otherwise it looks in the default
-installation of `ida-config.json` in IDA's user directory, in the directory
-where IDA's installer puts IDA, and then where the system searches for
-libraries.
+The loader finds IDA when floss-rs runs. IDA itself uses `$IDADIR` when
+that's set, and ends the process when IDA isn't there, so then the loader
+looks in `$IDADIR` only. Otherwise it looks in the default installation of
+`ida-config.json` in IDA's user directory, in the directory where IDA's
+installer puts IDA, and then where the system searches for libraries. On
+macOS, an installation is an application bundle, and the libraries are in its
+`Contents/MacOS`, which is also the value of `$IDADIR` there.
 
 Built for `x86_64-unknown-linux-musl` with only the lancelot backend, it's also statically linked, so it runs
 on any Linux, whatever its C library. musl's allocator made it 70% slower than

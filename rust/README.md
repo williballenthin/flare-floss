@@ -53,14 +53,14 @@ about a second longer per file (see
 
 The build needs no IDA installation: it links to the stub libraries of the
 IDA SDK, which come with idalib. The binary starts on a machine without IDA,
-and looks for IDA's libraries when it runs. On Linux and Windows, it looks in
-`$IDADIR` when that's set, and nowhere else then. Otherwise it looks in the
-default installation that `hcli ida set-default` records in
-`ida-config.json`, in the directory where IDA's installer puts IDA, and then
-where the system looks (`LD_LIBRARY_PATH`, `PATH`). On macOS, the build
-records the directory of IDA in the binary: `$IDADIR`, or else IDA's default
-directory. floss-rs looks there, and then where the dynamic linker looks
-(`DYLD_LIBRARY_PATH`).
+and looks for IDA's libraries when it runs. It looks in `$IDADIR` when that's
+set, and nowhere else then. Otherwise it looks in the default installation
+that `hcli ida set-default` records in `ida-config.json`, in the directory
+where IDA's installer puts IDA, and then where the system looks
+(`LD_LIBRARY_PATH`, `PATH`, `DYLD_LIBRARY_PATH`). On macOS, the dynamic
+linker has to find the libraries when the program starts. So when floss-rs
+finds IDA there, it starts itself again with IDA's directory in
+`DYLD_FALLBACK_LIBRARY_PATH`.
 
 Each backend is a cargo feature, and both are on by default. To leave the IDA
 backend out:
