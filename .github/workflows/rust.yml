@@ -238,15 +238,6 @@ jobs:
           HCLI_API_KEY: ${{ secrets.HCLI_API_KEY }}
           IDA_LICENSE_ID: ${{ secrets.IDA_LICENSE_ID }}
 
-      - name: Set IDAPYTHON_VENV_EXECUTABLE
-        run: |
-          VENV_PYTHON="$(uv python find "$HOME/.idapro/venv")"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            echo "IDAPYTHON_VENV_EXECUTABLE=$(cygpath -w "$VENV_PYTHON")" >> "$GITHUB_ENV"
-          else
-            echo "IDAPYTHON_VENV_EXECUTABLE=$VENV_PYTHON" >> "$GITHUB_ENV"
-          fi
-
       # the build records $IDADIR for the tests; on Windows, IDA's libraries come from PATH.
       - name: Set IDADIR
         run: |
