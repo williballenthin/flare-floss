@@ -433,8 +433,12 @@ floss-rs uses lancelot. Each system has its own way to make a library optional:
     that the list lacks is an undefined symbol when the binary links. The
     loader also defines the three variables, and the binary exports them, so
     IDA's libraries use the binary's copies, as they do for a program that
-    links to them. A statically linked program can't load a dynamic library,
-    so this binary needs glibc.
+    links to them. On a machine without IDA, the `idalib` crate adds the stub
+    libraries to the link of the binary. The build script writes two linker
+    scripts with the names of the stub libraries and no content, in a
+    directory that the linker searches first, so the linker uses those. A
+    statically linked program can't load a dynamic library, so this binary
+    needs glibc.
 
 On Windows and Linux, the loader finds IDA when floss-rs runs. IDA itself
 uses `$IDADIR` when that's set, and ends the process when IDA isn't there, so

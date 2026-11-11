@@ -41,6 +41,15 @@ fn link_ida() {
     }
 
     if os == "linux" && is_standalone {
+        // on a machine without IDA, idalib's build script adds the stub libraries to this link.
+        // these linker scripts have the same names and no content, and the linker finds them first.
+        let directory = PathBuf::from(env::var("OUT_DIR").unwrap()).join("ida");
+        fs::create_dir_all(&directory).unwrap();
+        for library in ["libida.so", "libidalib.so"] {
+            fs::write(directory.join(library), "/* no libraries */\n").unwrap();
+        }
+        println!("cargo::rustc-link-search=native={}", directory.display());
+
         for variable in ["callui", "batch", "under_debugger"] {
             println!("cargo::rustc-link-arg=-Wl,--export-dynamic-symbol={variable}");
         }
