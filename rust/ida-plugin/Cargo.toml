@@ -27,5 +27,11 @@ tempfile = "3"
 [profile.release]
 debug = 1
 
+# a plugin to copy around: no debug information.
+[profile.dist]
+inherits = "release"
+debug = false
+strip = true
+
 # its own workspace, so idalib's plugin feature applies to this build only.
 [workspace]

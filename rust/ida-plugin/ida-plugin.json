@@ -1,0 +1,38 @@
+{
+  "IDAMetadataDescriptorVersion": 1,
+  "plugin": {
+    "name": "floss",
+    "version": "0.1.0",
+    "entryPoint": "floss_ida",
+    "description": "Extract obfuscated strings (stack strings, tight strings, and decoded strings) with FLOSS, and show them in the Strings window and the listing",
+    "license": "Apache-2.0",
+    "idaVersions": ">=9.5",
+    "platforms": [
+      "linux-aarch64",
+      "linux-x86_64",
+      "macos-aarch64",
+      "macos-x86_64",
+      "windows-x86_64"
+    ],
+    "categories": [
+      "malware-analysis",
+      "deobfuscation"
+    ],
+    "keywords": [
+      "strings",
+      "stack-strings",
+      "obfuscation",
+      "emulation",
+      "floss"
+    ],
+    "urls": {
+      "repository": "https://github.com/mandiant/flare-floss"
+    },
+    "authors": [
+      {
+        "name": "Willi Ballenthin",
+        "email": "wballenthin@hex-rays.com"
+      }
+    ]
+  }
+}

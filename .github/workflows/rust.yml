@@ -1,0 +1,281 @@
+name: Rust
+
+on:
+  push:
+    paths:
+      - 'rust/**'
+      - 'floss/sigs/**'
+      - 'tests/data'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    paths:
+      - 'rust/**'
+      - 'floss/sigs/**'
+      - 'tests/data'
+      - '.github/workflows/rust.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+    working-directory: rust
+
+jobs:
+  build:
+    name: Build for ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: linux-x86_64
+            standalone-target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            name: linux-aarch64
+            standalone-target: aarch64-unknown-linux-musl
+          - os: windows-2025
+            name: windows-x86_64
+            standalone-target: x86_64-pc-windows-msvc
+            standalone-rustflags: -C target-feature=+crt-static
+          # one macOS binary runs with and without IDA.
+          - os: macos-15
+            name: macos-aarch64
+          - os: macos-15-intel
+            name: macos-x86_64
+    steps:
+      - name: Checkout FLOSS
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          lfs: true
+          persist-credentials: false
+
+      - name: Install build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev musl-tools
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            rust
+            rust/ida-plugin
+
+      - name: Test with the lancelot backend
+        run: cargo test --profile dist --locked --no-default-features --features lancelot
+
+      - name: Build floss-rs with both backends
+        run: cargo build --profile dist --locked
+
+      - name: Build floss-rs without dynamic dependencies
+        if: matrix.standalone-target
+        env:
+          TARGET: ${{ matrix.standalone-target }}
+          RUSTFLAGS: ${{ matrix.standalone-rustflags }}
+        run: |
+          rustup target add "$TARGET"
+          cargo build --profile dist --locked --target "$TARGET" --no-default-features --features lancelot
+
+      - name: Collect floss-rs
+        env:
+          TARGET: ${{ matrix.standalone-target }}
+        run: |
+          case "$RUNNER_OS" in
+            Windows) exe=.exe ;;
+            *)       exe="" ;;
+          esac
+          mkdir -p dist/floss-rs
+          if [ -n "$TARGET" ]; then
+            mkdir dist/floss-rs/ida
+            cp "target/$TARGET/dist/floss-rs$exe" dist/floss-rs/
+            cp "target/dist/floss-rs$exe" dist/floss-rs/ida/
+          else
+            cp "target/dist/floss-rs$exe" dist/floss-rs/
+          fi
+          ls -lR dist/floss-rs
+
+      - name: Run floss-rs without IDA
+        run: dist/floss-rs/floss-rs tests/programs/bin/reused-buffer-32-O0.exe | grep "secret key-xyz"
+
+      - name: Upload floss-rs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: floss-rs-${{ matrix.name }}
+          path: rust/dist/floss-rs/
+          if-no-files-found: error
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: false
+          version: "0.12.6"
+
+      # the archive is what the IDA Plugin Manager installs, for this platform.
+      - name: Package the IDA plugin
+        env:
+          PLATFORM: ${{ matrix.name }}
+        run: |
+          ida-plugin/package.sh "$PLATFORM" dist/floss
+          uv run --no-project python -m zipfile -c "dist/floss-ida-plugin-$PLATFORM.zip" dist/floss/*
+          uvx --from ida-hcli hcli plugin lint "dist/floss-ida-plugin-$PLATFORM.zip"
+
+      - name: Upload the IDA plugin
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: rust/dist/floss-ida-plugin-${{ matrix.name }}.zip
+          archive: false
+          if-no-files-found: error
+
+  web:
+    name: Build for the browser
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout FLOSS
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          lfs: true
+          persist-credentials: false
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+          rustup target add wasm32-wasip1
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: rust/web
+
+      - name: Build floss_web.wasm
+        run: web/build.sh
+
+      - name: Upload the web page
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: floss-rs-web
+          path: |
+            rust/web/index.html
+            rust/web/*.css
+            rust/web/*.js
+            rust/web/floss_web.wasm
+          if-no-files-found: error
+
+  # the IDA tests need the secrets HCLI_API_KEY and IDA_LICENSE_ID, which a pull request from a fork doesn't have.
+  ida-secrets:
+    name: Look for the IDA secrets
+    runs-on: ubuntu-24.04
+    outputs:
+      present: ${{ steps.look.outputs.present }}
+    steps:
+      - id: look
+        working-directory: .
+        env:
+          HCLI_API_KEY: ${{ secrets.HCLI_API_KEY }}
+          IDA_LICENSE_ID: ${{ secrets.IDA_LICENSE_ID }}
+        run: |
+          if [ -n "$HCLI_API_KEY" ] && [ -n "$IDA_LICENSE_ID" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  ida:
+    name: Test with IDA on ${{ matrix.os }}
+    needs: ida-secrets
+    if: needs.ida-secrets.outputs.present == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-2025]
+    steps:
+      - name: Checkout FLOSS
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          lfs: true
+          persist-credentials: false
+
+      # before IDA: its installer sets up IDAPython with the libpython that it finds.
+      - name: Install build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libpython3-dev
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: false
+          version: "0.12.6"
+
+      - name: Install IDA
+        run: |
+          uv run --no-project --with ida-hcli hcli \
+            ida install \
+            --download-id "ida-pro:latest" \
+            --license-id "${IDA_LICENSE_ID}" \
+            --install-dir="${{ runner.temp }}/app/ida" \
+            --create-python-environment \
+            --accept-eula \
+            --set-default \
+            --yes
+        env:
+          HCLI_API_KEY: ${{ secrets.HCLI_API_KEY }}
+          IDA_LICENSE_ID: ${{ secrets.IDA_LICENSE_ID }}
+
+      - name: Set IDAPYTHON_VENV_EXECUTABLE
+        run: |
+          VENV_PYTHON="$(uv python find "$HOME/.idapro/venv")"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            echo "IDAPYTHON_VENV_EXECUTABLE=$(cygpath -w "$VENV_PYTHON")" >> "$GITHUB_ENV"
+          else
+            echo "IDAPYTHON_VENV_EXECUTABLE=$VENV_PYTHON" >> "$GITHUB_ENV"
+          fi
+
+      # the build records $IDADIR for the tests; on Windows, IDA's libraries come from PATH.
+      - name: Set IDADIR
+        run: |
+          case "$RUNNER_OS" in
+            macOS)
+              echo "IDADIR=$RUNNER_TEMP/app/ida/Contents/MacOS" >> "$GITHUB_ENV"
+              ;;
+            Windows)
+              echo "IDADIR=$(cygpath -w "$RUNNER_TEMP/app/ida")" >> "$GITHUB_ENV"
+              cygpath -w "$RUNNER_TEMP/app/ida" >> "$GITHUB_PATH"
+              ;;
+            *)
+              echo "IDADIR=$RUNNER_TEMP/app/ida" >> "$GITHUB_ENV"
+              ;;
+          esac
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            rust
+            rust/ida-plugin
+
+      - name: Test floss-rs
+        run: IDA_MALWARE_DISABLE_UNPACKER=1 cargo test --release --locked
+
+      - name: Test the IDA plugin
+        working-directory: rust/ida-plugin
+        run: IDA_MALWARE_DISABLE_UNPACKER=1 cargo test --release --locked

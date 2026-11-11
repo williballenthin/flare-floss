@@ -409,8 +409,10 @@ at runtime, so it needs no files and writes none.
 
 The binary has both backends, and one dynamic dependency, IDA's libraries. A
 build with only the lancelot backend has none. `build.rs` links to the stub
-libraries of the IDA SDK, and records the directory of the IDA installation as
-a search path. On macOS the two libraries
+libraries of the IDA SDK, so the build needs no IDA installation. On macOS and
+Linux it records the directory of the IDA installation as a search path; a
+Windows binary has no such record, and finds the libraries on `PATH`. On macOS
+the two libraries
 are weak: when the dynamic linker doesn't find them, floss-rs still starts, and
 the addresses of IDA's symbols are null. `backend::ida::is_loaded` asks the
 linker for one of them, and nothing calls IDA when the answer is no. In both
@@ -588,13 +590,25 @@ next to the IDA program that loads it.
 `synth.rs` has unit tests, with a few lines of data in place of a database.
 The tests in `ida-plugin/tests` run the plugin where it runs for users. Each
 starts `idat` on a copy of a test program, with a user directory that has the
-plugin in `plugins/`, so IDA loads and runs it as it does for a user. An
+plugin in `plugins/floss/`, with its `ida-plugin.json`, as the Plugin Manager
+installs it. So IDA loads and runs the plugin as it does for a user. An
 IDAPython script waits for the analysis, prints the synthetic strings of the
 database and the listing at their uses, and exits; the test reads that from
 IDA's log file. One test opens the saved database again, and checks that the
 strings are there and that the plugin didn't run. Cargo builds a library for
 a package's tests only when the tests can link to it, so the library is also
 an `rlib`, which nothing uses.
+
+### Packaging
+
+`ida-plugin.json` describes the plugin to IDA and to its Plugin Manager. The
+entry point there is `floss_ida`, without an extension, and IDA adds the
+extension of its platform. `package.sh` builds the library and makes the
+directory that the Plugin Manager installs: the manifest, the README, and the
+library as `floss_ida.so`, `floss_ida.dylib` or `floss_ida.dll`. An archive
+is for one platform, and its manifest names that platform only. One archive
+can't hold both Linux libraries, because they have the same name. The Plugin
+Manager picks the archive of a release that names the platform of the user.
 
 ## Choices, and what they cost
 

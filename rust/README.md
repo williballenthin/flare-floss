@@ -51,11 +51,13 @@ functions and names library functions with its own signatures, and takes
 about a second longer per file (see
 [EVALUATION.md](doc/EVALUATION.md#ida-and-lancelot)).
 
-The build needs an IDA installation, in `$IDADIR` or else in IDA's default
-directory, and records that directory in the binary. When it runs, floss-rs
-looks for IDA's libraries there, and then where the dynamic linker looks
-(`DYLD_LIBRARY_PATH`, `LD_LIBRARY_PATH`). On macOS, floss-rs runs without
-them. On Linux and Windows, a binary with the IDA backend doesn't start
+The build needs no IDA installation: it links to the stub libraries of the
+IDA SDK, which come with idalib. On macOS and Linux, the build records the
+directory of IDA in the binary: `$IDADIR`, or else IDA's default directory.
+When it runs, floss-rs looks for IDA's libraries there, and then where the
+dynamic linker looks (`DYLD_LIBRARY_PATH`, `LD_LIBRARY_PATH`). On Windows,
+IDA's directory must be on `PATH`. On macOS, floss-rs runs without the
+libraries. On Linux and Windows, a binary with the IDA backend doesn't start
 without them.
 
 Each backend is a cargo feature, and both are on by default. For a machine
@@ -76,6 +78,14 @@ cargo build --profile dist --target x86_64-unknown-linux-musl --no-default-featu
 ```
 
 That's a 28MB file, about 10% slower than the glibc build.
+
+On Windows, link the C runtime statically, and then the binary runs on a
+machine without the Visual C++ runtime:
+
+```
+set RUSTFLAGS=-C target-feature=+crt-static
+cargo build --profile dist --target x86_64-pc-windows-msvc --no-default-features --features lancelot
+```
 
 ### In IDA
 
@@ -125,14 +135,22 @@ FLOSS: 1 of the decoded strings are static strings of the program too, and aren'
 ```
 
 ```
-cd ida-plugin
-cargo build --release
-cp target/release/libfloss_ida.dylib ~/.idapro/plugins/
+ida-plugin/package.sh macos-aarch64 dist/floss    # needs jq
+hcli plugin install dist/floss
 ```
 
-The library is `libfloss_ida.so` on Linux, and `floss_ida.dll` on Windows,
-where the directory is `%APPDATA%\Hex-Rays\IDA Pro\plugins`. The build finds
-IDA as the floss-rs build does.
+`package.sh` builds the plugin and makes the directory that IDA's Plugin
+Manager installs: the library, and `ida-plugin.json`, which describes the
+plugin. Its first argument is the platform of the build: `linux-x86_64`,
+`linux-aarch64`, `macos-aarch64`, `macos-x86_64` or `windows-x86_64`.
+[HCLI](https://hcli.docs.hex-rays.com) copies the directory to the `plugins`
+directory of the IDA user directory, `~/.idapro` or `%APPDATA%\Hex-Rays\IDA Pro`.
+Like floss-rs, the plugin builds without IDA.
+
+Without the Plugin Manager, build the library with `cargo build --release` in
+`ida-plugin/`, and copy it from `target/release/` to the `plugins` directory.
+It's `libfloss_ida.dylib` on macOS, `libfloss_ida.so` on Linux, and
+`floss_ida.dll` on Windows.
 
 The plugin reads the program from the database, like the IDA backend, so it
 works from the functions and names that the user has there. It runs with the
@@ -240,4 +258,16 @@ IDA only works on the main thread, so `tests/test_ida.rs` runs its tests there,
 one at a time, with [libtest-mimic](https://github.com/LukasKalbertodt/libtest-mimic).
 The plugin's tests start `idat`, the text-mode IDA, on a test program, with the
 plugin among IDA's plugins, and read the synthetic strings of the database and
-the listing at their uses from IDA's log. They need IDAPython.
+the listing at their uses from IDA's log. They need IDAPython, and the IDA
+that the plugin build found, in `$IDADIR` or else in IDA's default directory.
+
+`.github/workflows/rust.yml` is the continuous integration, on Linux, macOS
+and Windows. Its build job has no IDA. It runs the tests of the lancelot
+backend, and builds floss-rs, the plugin and the page for the browser. Each
+run has the binaries as artifacts, for each platform. In `floss-rs-<platform>`,
+`floss-rs` runs on a machine without IDA, and on Linux and Windows
+`ida/floss-rs` is the build with the IDA backend. `floss-ida-plugin-<platform>.zip`
+is the plugin as an archive for the Plugin Manager, which
+`hcli plugin install` takes, and which `hcli plugin lint` has checked. The
+tests with IDA run when the repository has the secrets `HCLI_API_KEY` and
+`IDA_LICENSE_ID`, with which HCLI installs IDA.

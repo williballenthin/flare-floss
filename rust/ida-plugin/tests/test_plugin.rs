@@ -10,6 +10,8 @@ use std::{
     process::{Command, Stdio},
 };
 
+const MANIFEST: &str = include_str!("../ida-plugin.json");
+
 const DUMP: &str = r#"
 import ida_auto, ida_ida, ida_lines, ida_pro, ida_strlist
 
@@ -87,10 +89,18 @@ fn open(dir: &Path, input: &Path) -> Database {
     let idat = Path::new(env!("IDADIR")).join(format!("idat{EXE_SUFFIX}"));
 
     // IDA loads plugins from each user directory; the license is in the user's own.
+    // the plugin is there as the Plugin Manager installs it: a directory with ida-plugin.json,
+    // and the library by the name of the entry point.
     let user = dir.join("user");
-    std::fs::create_dir_all(user.join("plugins")).unwrap();
-    std::fs::copy(&plugin, user.join("plugins").join(&name)).unwrap();
-    let home = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".idapro"));
+    let installed = user.join("plugins").join("floss");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::write(installed.join("ida-plugin.json"), MANIFEST).unwrap();
+    std::fs::copy(&plugin, installed.join(format!("floss_ida{DLL_SUFFIX}"))).unwrap();
+    let home = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(|appdata| PathBuf::from(appdata).join("Hex-Rays").join("IDA Pro"))
+    } else {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".idapro"))
+    };
     let users = std::env::var_os("IDAUSR").map(|users| std::env::split_paths(&users).collect()).or(home.map(|home| vec![home]));
     let users = std::env::join_paths([user].into_iter().chain(users.unwrap_or_default())).unwrap();
 
@@ -119,6 +129,12 @@ fn open(dir: &Path, input: &Path) -> Database {
 fn analyze(program: &str) -> Database {
     let (dir, sample) = get_workspace(program);
     open(dir.path(), &sample)
+}
+
+#[test]
+fn manifest_has_the_version_of_the_crate() {
+    let version = concat!("\"version\": \"", env!("CARGO_PKG_VERSION"), "\"");
+    assert!(MANIFEST.contains(version), "ida-plugin.json doesn't have {version}");
 }
 
 #[test]

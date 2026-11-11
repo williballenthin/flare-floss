@@ -13,28 +13,35 @@ use std::{
 #[path = "build_apis.rs"]
 mod apis;
 
-/// Link to IDA's libraries, via the stub libraries of the IDA SDK.
-/// They're found, when floss-rs runs, in the IDA installation of this build (`$IDADIR`, or else
-/// IDA's default installation directory), or along the library search path of the dynamic linker.
+/// Link to IDA's libraries, via the stub libraries of the IDA SDK, so the build needs no IDA.
+///
+/// When floss-rs runs, the dynamic linker finds them in the IDA installation of this build
+/// (`$IDADIR`, or else IDA's default installation directory), or along its own search path.
+/// Windows has no such record in a binary: there, only the search path counts.
 ///
 /// On macOS, they're weak libraries, so floss-rs also runs when IDA isn't there: see `backend::ida::is_loaded`.
 #[cfg(feature = "ida-database")]
 fn link_ida() {
-    if env::var("CARGO_CFG_TARGET_OS").unwrap() != "macos" {
-        idalib_build::configure_linkage()
-            .expect("can't find IDA: set IDADIR to its installation directory");
+    let os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    if os == "windows" {
+        idalib_build::configure_idasdk_linkage();
         return;
     }
 
     let (install_path, _, _) = idalib_build::idalib_install_paths_with(false);
     let (_, stub_path, _, _) = idalib_build::idalib_sdk_paths();
+    let libraries = if os == "macos" {
+        "-weak-lida,-weak-lidalib"
+    } else {
+        "-l:libida.so,-l:libidalib.so"
+    };
     println!("cargo::rerun-if-env-changed=IDADIR");
     println!(
         "cargo::rustc-link-arg=-Wl,-rpath,{}",
         install_path.display()
     );
     println!(
-        "cargo::rustc-link-arg=-Wl,-L{},-weak-lida,-weak-lidalib",
+        "cargo::rustc-link-arg=-Wl,-L{},{libraries}",
         stub_path.display()
     );
 }
