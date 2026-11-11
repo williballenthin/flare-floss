@@ -40,15 +40,12 @@ jobs:
         include:
           - os: ubuntu-24.04
             name: linux-x86_64
-            standalone-target: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
             name: linux-aarch64
-            standalone-target: aarch64-unknown-linux-musl
+          # with the C runtime in the binary, it runs on a machine without the Visual C++ runtime.
           - os: windows-2025
             name: windows-x86_64
-            standalone-target: x86_64-pc-windows-msvc
-            standalone-rustflags: -C target-feature=+crt-static
-          # one macOS binary runs with and without IDA.
+            rustflags: -C target-feature=+crt-static
           - os: macos-15
             name: macos-aarch64
           - os: macos-15-intel
@@ -63,7 +60,7 @@ jobs:
 
       - name: Install build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev musl-tools
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
 
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
@@ -76,37 +73,25 @@ jobs:
             rust/ida-plugin
 
       - name: Test with the lancelot backend
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo test --profile dist --locked --no-default-features --features lancelot
 
-      - name: Build floss-rs with both backends
+      # one binary has both backends, and uses IDA when IDA is there.
+      - name: Build floss-rs
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --profile dist --locked
 
-      - name: Build floss-rs without dynamic dependencies
-        if: matrix.standalone-target
-        env:
-          TARGET: ${{ matrix.standalone-target }}
-          RUSTFLAGS: ${{ matrix.standalone-rustflags }}
-        run: |
-          rustup target add "$TARGET"
-          cargo build --profile dist --locked --target "$TARGET" --no-default-features --features lancelot
-
       - name: Collect floss-rs
-        env:
-          TARGET: ${{ matrix.standalone-target }}
         run: |
           case "$RUNNER_OS" in
             Windows) exe=.exe ;;
             *)       exe="" ;;
           esac
           mkdir -p dist/floss-rs
-          if [ -n "$TARGET" ]; then
-            mkdir dist/floss-rs/ida
-            cp "target/$TARGET/dist/floss-rs$exe" dist/floss-rs/
-            cp "target/dist/floss-rs$exe" dist/floss-rs/ida/
-          else
-            cp "target/dist/floss-rs$exe" dist/floss-rs/
-          fi
-          ls -lR dist/floss-rs
+          cp "target/dist/floss-rs$exe" dist/floss-rs/
+          ls -l dist/floss-rs
 
       - name: Run floss-rs without IDA
         run: dist/floss-rs/floss-rs tests/programs/bin/reused-buffer-32-O0.exe | grep "secret key-xyz"
@@ -238,7 +223,7 @@ jobs:
           HCLI_API_KEY: ${{ secrets.HCLI_API_KEY }}
           IDA_LICENSE_ID: ${{ secrets.IDA_LICENSE_ID }}
 
-      # the build records $IDADIR for the tests; on Windows, IDA's libraries come from PATH.
+      # the plugin's build and the tests find IDA in $IDADIR.
       - name: Set IDADIR
         run: |
           case "$RUNNER_OS" in
@@ -247,7 +232,6 @@ jobs:
               ;;
             Windows)
               echo "IDADIR=$(cygpath -w "$RUNNER_TEMP/app/ida")" >> "$GITHUB_ENV"
-              cygpath -w "$RUNNER_TEMP/app/ida" >> "$GITHUB_PATH"
               ;;
             *)
               echo "IDADIR=$RUNNER_TEMP/app/ida" >> "$GITHUB_ENV"
@@ -264,8 +248,19 @@ jobs:
             rust
             rust/ida-plugin
 
+      # the same C runtime as the binary of the build job.
       - name: Test floss-rs
-        run: IDA_MALWARE_DISABLE_UNPACKER=1 cargo test --release --locked
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: |
+          IDA_MALWARE_DISABLE_UNPACKER=1 cargo test --release --locked
+          cargo build --release --locked
+
+      # without $IDADIR, floss-rs finds the installation that HCLI made the default.
+      - name: Run floss-rs with IDA
+        run: |
+          IDA_MALWARE_DISABLE_UNPACKER=1 target/release/floss-rs --backend ida tests/programs/bin/reused-buffer-32-O0.exe | grep "secret key-xyz"
+          env -u IDADIR IDA_MALWARE_DISABLE_UNPACKER=1 target/release/floss-rs --backend ida tests/programs/bin/reused-buffer-32-O0.exe | grep "secret key-xyz"
 
       - name: Test the IDA plugin
         working-directory: rust/ida-plugin

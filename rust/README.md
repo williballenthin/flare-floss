@@ -27,8 +27,8 @@ cargo build --release
 ```
 
 The binary is self-contained: the data it uses is built in (see
-[DESIGN.md](doc/DESIGN.md#one-file)). Its one dynamic dependency is IDA, which
-it uses when IDA is there.
+[DESIGN.md](doc/DESIGN.md#one-file)). It uses IDA when IDA is there, and runs
+without it.
 
 ### Backends
 
@@ -52,24 +52,26 @@ about a second longer per file (see
 [EVALUATION.md](doc/EVALUATION.md#ida-and-lancelot)).
 
 The build needs no IDA installation: it links to the stub libraries of the
-IDA SDK, which come with idalib. On macOS and Linux, the build records the
-directory of IDA in the binary: `$IDADIR`, or else IDA's default directory.
-When it runs, floss-rs looks for IDA's libraries there, and then where the
-dynamic linker looks (`DYLD_LIBRARY_PATH`, `LD_LIBRARY_PATH`). On Windows,
-IDA's directory must be on `PATH`. On macOS, floss-rs runs without the
-libraries. On Linux and Windows, a binary with the IDA backend doesn't start
-without them.
+IDA SDK, which come with idalib. The binary starts on a machine without IDA,
+and looks for IDA's libraries when it runs. On Linux and Windows, it looks in
+`$IDADIR` when that's set, and nowhere else then. Otherwise it looks in the
+default installation that `hcli ida set-default` records in
+`ida-config.json`, in the directory where IDA's installer puts IDA, and then
+where the system looks (`LD_LIBRARY_PATH`, `PATH`). On macOS, the build
+records the directory of IDA in the binary: `$IDADIR`, or else IDA's default
+directory. floss-rs looks there, and then where the dynamic linker looks
+(`DYLD_LIBRARY_PATH`).
 
-Each backend is a cargo feature, and both are on by default. For a machine
-without IDA, leave the IDA backend out, and then the binary has no dynamic
-dependencies:
+Each backend is a cargo feature, and both are on by default. To leave the IDA
+backend out:
 
 ```
 cargo build --release --no-default-features --features lancelot
 ```
 
-For a binary that runs on any Linux, link the lancelot build statically with
-musl (zydis needs `musl-gcc`: Debian's `musl-tools`):
+On Linux, the build with both backends needs glibc, because it loads IDA's
+libraries. For a binary that runs on any Linux, link the lancelot build
+statically with musl (zydis needs `musl-gcc`: Debian's `musl-tools`):
 
 ```
 rustup target add x86_64-unknown-linux-musl
@@ -84,7 +86,7 @@ machine without the Visual C++ runtime:
 
 ```
 set RUSTFLAGS=-C target-feature=+crt-static
-cargo build --profile dist --target x86_64-pc-windows-msvc --no-default-features --features lancelot
+cargo build --profile dist
 ```
 
 ### In IDA
@@ -264,9 +266,10 @@ that the plugin build found, in `$IDADIR` or else in IDA's default directory.
 `.github/workflows/rust.yml` is the continuous integration, on Linux, macOS
 and Windows. Its build job has no IDA. It runs the tests of the lancelot
 backend, and builds floss-rs, the plugin and the page for the browser. Each
-run has the binaries as artifacts, for each platform. In `floss-rs-<platform>`,
-`floss-rs` runs on a machine without IDA, and on Linux and Windows
-`ida/floss-rs` is the build with the IDA backend. `floss-ida-plugin-<platform>.zip`
+run has the binaries as artifacts, for each platform. `floss-rs-<platform>`
+has `floss-rs`, one binary with both backends: it runs on a machine without
+IDA, and uses IDA where it finds IDA. The Linux binary needs glibc 2.34 or
+later. `floss-ida-plugin-<platform>.zip`
 is the plugin as an archive for the Plugin Manager, which
 `hcli plugin install` takes, and which `hcli plugin lint` has checked. The
 tests with IDA run when the repository has the secrets `HCLI_API_KEY` and

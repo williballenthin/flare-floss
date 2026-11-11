@@ -407,29 +407,41 @@ at runtime, so it needs no files and writes none.
   - FLOSS's FLIRT signatures (15MB, used with `--flirt`, for the lancelot backend), from `floss/sigs`;
   - the table of Windows API calling conventions (`build_apis.rs`), from `deps/win32json` and `deps/phnt`.
 
-The binary has both backends, and one dynamic dependency, IDA's libraries. A
-build with only the lancelot backend has none. `build.rs` links to the stub
-libraries of the IDA SDK, so the build needs no IDA installation. On macOS and
-Linux it records the directory of the IDA installation as a search path; a
-Windows binary has no such record, and finds the libraries on `PATH`. On macOS
-the two libraries
-are weak: when the dynamic linker doesn't find them, floss-rs still starts, and
-the addresses of IDA's symbols are null. `backend::ida::is_loaded` asks the
-linker for one of them, and nothing calls IDA when the answer is no. In both
-cases IDA can be present without a license, and then floss-rs uses lancelot.
+The binary has both backends. It starts on a machine without IDA, and uses
+IDA's libraries (libida and libidalib) when it finds them. `build.rs` links to
+the stub libraries of the IDA SDK, so the build needs no IDA installation.
+`backend::ida::loader` brings the libraries into the process, and nothing
+calls IDA before that succeeds. IDA can be present without a license, and then
+floss-rs uses lancelot. Each system has its own way to make a library optional:
 
-Linux and Windows have no such link, so a binary with the IDA backend doesn't
-start there without IDA's libraries. An ELF file can't mark a library as
-optional, and Windows delay loading doesn't cover imported data, which IDA's
-interface has. The way to make IDA optional on those systems is a dynamic
-library for the IDA backend. That library links to IDA and exports one C
-function, which analyzes a file and returns the `Program` as serialized data.
-floss-rs loads it at run time, with `dlopen` or `LoadLibrary`, and uses
-lancelot when the load fails. The main binary then has no link to IDA, so it
-starts on every system. `Program` is plain data, so the interface stays one
-function wide. The cost is a second build product: it ships beside the binary,
-or the binary embeds it and writes it to a file before the load. floss-rs
-doesn't have this library.
+  - macOS: the two libraries are weak. When the dynamic linker doesn't find
+    them, floss-rs still starts, and the addresses of IDA's symbols are null.
+    The loader asks the linker for one of them. The build records the
+    directory of the IDA installation as a search path.
+  - Windows: the two libraries are delay-loaded DLLs. A call to a function of
+    IDA goes through a thunk of the linker, which loads the DLL at the first
+    call. The loader loads both DLLs from IDA's directory before that. Delay
+    loading doesn't cover imported data, which IDA's interface has: `callui`,
+    `batch`, and `under_debugger`. The code reads the address of such a
+    variable from a pointer named `__imp_<name>`, usually an entry of the
+    import table. The loader defines these three pointers, and sets them with
+    `GetProcAddress`.
+  - Linux: an ELF file can't mark a library as optional, so the binary doesn't
+    name IDA's libraries. The loader defines each function of IDA that the
+    binary calls as a jump through a slot, and fills the slots with `dlsym`
+    after `dlopen`. The list of these functions is in the loader. A function
+    that the list lacks is an undefined symbol when the binary links. The
+    loader also defines the three variables, and the binary exports them, so
+    IDA's libraries use the binary's copies, as they do for a program that
+    links to them. A statically linked program can't load a dynamic library,
+    so this binary needs glibc.
+
+On Windows and Linux, the loader finds IDA when floss-rs runs. IDA itself
+uses `$IDADIR` when that's set, and ends the process when IDA isn't there, so
+then the loader looks in `$IDADIR` only. Otherwise it looks in the default
+installation of `ida-config.json` in IDA's user directory, in the directory
+where IDA's installer puts IDA, and then where the system searches for
+libraries.
 
 Built for `x86_64-unknown-linux-musl` with only the lancelot backend, it's also statically linked, so it runs
 on any Linux, whatever its C library. musl's allocator made it 70% slower than

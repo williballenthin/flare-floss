@@ -20,7 +20,9 @@ use crate::program::{Arch, BasicBlock, Function, Import, Program, Segment, VA};
 #[cfg(feature = "ida")]
 mod library;
 #[cfg(feature = "ida")]
-pub use library::{find_input_file, is_database, is_loaded, load, validate_available, Options};
+mod loader;
+#[cfg(feature = "ida")]
+pub use library::{find_input_file, is_database, load, validate_available, Options};
 
 /// the SDK's `qstring`.
 #[repr(C)]

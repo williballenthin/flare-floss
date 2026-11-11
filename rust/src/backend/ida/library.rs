@@ -11,7 +11,7 @@ use idalib::{
     meta::FileType,
 };
 
-use super::get_program;
+use super::{get_program, loader::load_libraries};
 use crate::program::{Arch, Program, VA};
 
 /// like vivisect's shellcode workspaces.
@@ -58,26 +58,11 @@ pub fn find_input_file(database: &Path) -> Option<PathBuf> {
     (is_database(database) && path.is_file()).then_some(path)
 }
 
-/// Are IDA's libraries loaded into this process?
-///
-/// On macOS, they're weak libraries (see `build.rs`): when the dynamic linker doesn't find them,
-/// the program still starts, and the address of each of their symbols is null.
-/// Elsewhere, the program doesn't start without them.
-pub fn is_loaded() -> bool {
-    #[cfg(target_os = "macos")]
-    return !unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"init_library".as_ptr()) }.is_null();
-    #[cfg(not(target_os = "macos"))]
-    true
-}
-
-/// Check that IDA can be used: its libraries are loaded, it starts, and it has a license.
+/// Check that IDA can be used: its libraries load, it starts, and it has a license.
 ///
 /// This starts IDA, which stays loaded, so it must be called from the main thread.
 pub fn validate_available() -> Result<()> {
-    ensure!(
-        is_loaded(),
-        "IDA's libraries (libida and libidalib) aren't found"
-    );
+    load_libraries()?;
     // idalib panics when IDA doesn't start.
     let has_license = std::panic::catch_unwind(idalib::license::is_valid_license)
         .map_err(|_| anyhow!("IDA doesn't start"))?;
@@ -90,10 +75,7 @@ pub fn validate_available() -> Result<()> {
 /// `path` is the file to analyze, or an IDA database (.i64/.idb), which is opened as it is.
 /// This must be called from the main thread, and the database is closed when it returns.
 pub fn load(path: &Path, opts: &Options) -> Result<Program> {
-    ensure!(
-        is_loaded(),
-        "IDA's libraries (libida and libidalib) aren't found"
-    );
+    load_libraries()?;
     let session = Session::open(path, opts)?;
     get_program(&session.idb)
 }

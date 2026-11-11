@@ -4,7 +4,7 @@
 //!   - FLOSS's FLIRT signatures, for the lancelot backend (see `src/backend/lancelot/flirt.rs`),
 //!   - the table of Windows API calling conventions, which `build_apis.rs` generates.
 //!
-//! with the IDA backend, link to IDA, the one dynamic dependency (see `link_ida`).
+//! with the IDA backend, link to IDA (see `link_ida`).
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -15,16 +15,35 @@ mod apis;
 
 /// Link to IDA's libraries, via the stub libraries of the IDA SDK, so the build needs no IDA.
 ///
-/// When floss-rs runs, the dynamic linker finds them in the IDA installation of this build
-/// (`$IDADIR`, or else IDA's default installation directory), or along its own search path.
-/// Windows has no such record in a binary: there, only the search path counts.
+/// With the feature `ida`, the binary also runs when IDA isn't there,
+/// so the libraries aren't ordinary dependencies (see `backend::ida::loader`):
 ///
-/// On macOS, they're weak libraries, so floss-rs also runs when IDA isn't there: see `backend::ida::is_loaded`.
+///   - macOS: they're weak libraries. The dynamic linker finds them in the IDA installation
+///     of this build (`$IDADIR`, or else IDA's default installation directory),
+///     or along its own search path.
+///   - Windows: they're delay-loaded DLLs.
+///   - Linux: the binary doesn't link to them. It exports the variables that it shares with them.
+///
+/// Without the feature `ida`, the code runs inside IDA, which has the libraries.
 #[cfg(feature = "ida-database")]
 fn link_ida() {
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    let is_standalone = cfg!(feature = "ida");
+
     if os == "windows" {
         idalib_build::configure_idasdk_linkage();
+        if is_standalone {
+            for argument in ["/DELAYLOAD:ida.dll", "/DELAYLOAD:idalib.dll", "delayimp.lib"] {
+                println!("cargo::rustc-link-arg={argument}");
+            }
+        }
+        return;
+    }
+
+    if os == "linux" && is_standalone {
+        for variable in ["callui", "batch", "under_debugger"] {
+            println!("cargo::rustc-link-arg=-Wl,--export-dynamic-symbol={variable}");
+        }
         return;
     }
 
