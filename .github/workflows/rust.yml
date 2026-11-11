@@ -34,14 +34,18 @@ jobs:
   build:
     name: Build for ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # the container has glibc 2.28, so the binary runs on a distribution with that version or a later one.
           - os: ubuntu-24.04
             name: linux-x86_64
+            container: quay.io/pypa/manylinux_2_28_x86_64:2026.11.07-1
           - os: ubuntu-24.04-arm
             name: linux-aarch64
+            container: quay.io/pypa/manylinux_2_28_aarch64:2026.11.07-1
           # with the C runtime in the binary, it runs on a machine without the Visual C++ runtime.
           - os: windows-2025
             name: windows-x86_64
@@ -59,15 +63,20 @@ jobs:
           persist-credentials: false
 
       - name: Install build tools
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+        if: matrix.container
+        run: |
+          dnf install -y clang clang-devel jq
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
 
+      # a build in the container doesn't use the cache of a build on the runner.
       - name: Cache Rust builds
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          key: ${{ matrix.container && 'manylinux_2_28' || '' }}
           workspaces: |
             rust
             rust/ida-plugin

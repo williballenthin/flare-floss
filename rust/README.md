@@ -268,8 +268,9 @@ and Windows. Its build job has no IDA. It runs the tests of the lancelot
 backend, and builds floss-rs, the plugin and the page for the browser. Each
 run has the binaries as artifacts, for each platform. `floss-rs-<platform>`
 has `floss-rs`, one binary with both backends: it runs on a machine without
-IDA, and uses IDA where it finds IDA. The Linux binary needs glibc 2.34 or
-later. `floss-ida-plugin-<platform>.zip`
+IDA, and uses IDA where it finds IDA. The Linux builds run in a container
+with glibc 2.28, so the Linux binary and plugin need glibc 2.28 or later,
+as IDA's libraries do. `floss-ida-plugin-<platform>.zip`
 is the plugin as an archive for the Plugin Manager, which
 `hcli plugin install` takes, and which `hcli plugin lint` has checked. The
 tests with IDA run when the repository has the secrets `HCLI_API_KEY` and
